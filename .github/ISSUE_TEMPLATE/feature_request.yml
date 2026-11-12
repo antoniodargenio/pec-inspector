@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement or a new feature
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the use case rather than the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: A command line option, an output format, an example of what you would like to see.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you tried
+  - type: markdown
+    attributes:
+      value: |
+        Please do not attach real messages. If a sample is needed, use an anonymised `.eml` with placeholder
+        addresses (see `--eml` for offline analysis).

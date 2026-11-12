@@ -235,6 +235,13 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 Run `python scripts/next_version.py --explain` to see what the next release would be. Releases from a source
 checkout without installing report the version `0+unknown`.
 
+## Bugs and feature requests
+
+Open an [issue](https://github.com/antoniodargenio/pec-inspector/issues/new/choose) (templates for bug reports and
+feature requests). Please anonymise anything you paste: the output of the tool contains addresses, subjects and local
+paths, and no message, attachment or password should ever be attached. Security problems: see
+[SECURITY.md](SECURITY.md) and use the private advisory form instead of a public issue.
+
 ## Development
 
 ```sh

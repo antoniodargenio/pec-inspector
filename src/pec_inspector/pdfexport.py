@@ -19,7 +19,7 @@ MAX_BODY_CHARS = 20000          # a very long body is cut, with a note, to keep 
 
 A4_W, A4_H = 595.2756, 841.8898        # points
 
-ROLE_LABELS = {"sent": "INVIATO", "received": "RICEVUTO", "receipt": "RICEVUTA", "message": "MESSAGGIO"}
+ROLE_LABELS = {"sent": "SENT", "received": "RECEIVED", "receipt": "RECEIPT", "message": "MESSAGE"}
 
 
 class PdfUnavailable(RuntimeError):
@@ -57,14 +57,14 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
     body = ParagraphStyle("b", parent=styles["Normal"], fontSize=9.5, leading=12.5)
     small = ParagraphStyle("s", parent=meta, fontSize=8.5, leading=11)
 
-    subject = thread["subject"] or "(senza oggetto)"
+    subject = thread["subject"] or "(no subject)"
     counts = thread["counts"]
     story = [Paragraph(_paragraph_text(subject), title),
              Paragraph(_paragraph_text(
-                 f"Conversazione {thread['id']} - {len(thread['messages'])} messaggi: {counts['sent']} inviati, "
-                 f"{counts['received']} ricevuti, {counts['receipts']} ricevute"
+                 f"Conversation {thread['id']} - {len(thread['messages'])} messages: {counts['sent']} sent, "
+                 f"{counts['received']} received, {counts['receipts']} receipts"
                  + (f" ({', '.join(thread['receipts'])})" if thread["receipts"] else "")), meta),
-             Paragraph(_paragraph_text(f"Dal {thread['first_date']} al {thread['last_date']}"), meta),
+             Paragraph(_paragraph_text(f"From {thread['first_date']} to {thread['last_date']}"), meta),
              Spacer(1, 4), HRFlowable(width="100%", color=colors.grey)]
 
     embedded: list = []                  # attachments to append at the end, each distinct file once
@@ -79,7 +79,7 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
         label = ROLE_LABELS.get(entry["role"], entry["role"].upper())
         if entry["receipt"]:
             label += f" - {entry['receipt']}"
-        lines = [f"Data: {entry['date']}", f"Da: {entry['from']}", f"A: {entry['to']}", f"Oggetto: {entry['subject']}"]
+        lines = [f"Date: {entry['date']}", f"From: {entry['from']}", f"To: {entry['to']}", f"Subject: {entry['subject']}"]
         block = [Paragraph(_paragraph_text(f"{number}. {label}"), head),
                  Paragraph(_paragraph_text("\n".join(lines)), meta), Spacer(1, 4)]
         text, names = "", []
@@ -91,28 +91,28 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
             for name, data in parts["attachments"]:
                 digest = hashlib.sha256(data).hexdigest()
                 if digest in seen:
-                    names.append(f"{name} (stesso file dell'allegato {seen[digest]})")
+                    names.append(f"{name} (same file as attachment {seen[digest]})")
                     continue
                 kind = _kind(data)
                 if kind and pypdf_ok:
                     embedded.append({"name": name, "data": data, "kind": kind, "message": number})
                     seen[digest] = f"{len(embedded)}"
-                    names.append(f"{name} (incorporato come allegato {len(embedded)})")
+                    names.append(f"{name} (embedded as attachment {len(embedded)})")
                 else:
                     seen[digest] = name
-                    names.append(f"{name} (non incorporato: " + ("formato non supportato" if pypdf_ok else "manca pypdf") + ")")
+                    names.append(f"{name} (not embedded: " + ("unsupported format" if pypdf_ok else "pypdf missing") + ")")
         if len(text) > MAX_BODY_CHARS:
-            text = text[:MAX_BODY_CHARS] + "\n[... testo troncato ...]"
-        block.append(Paragraph(_paragraph_text(text.strip() or "(nessun testo)"), body))
+            text = text[:MAX_BODY_CHARS] + "\n[... text truncated ...]"
+        block.append(Paragraph(_paragraph_text(text.strip() or "(no text)"), body))
         if names:
-            block += [Spacer(1, 3), Paragraph(_paragraph_text("Allegati: " + ", ".join(names)), small)]
+            block += [Spacer(1, 3), Paragraph(_paragraph_text("Attachments: " + ", ".join(names)), small)]
         story += [KeepTogether(block[:3]), *block[3:], Spacer(1, 6), HRFlowable(width="100%", color=colors.lightgrey)]
 
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(colors.grey)
-        canvas.drawRightString(A4[0] - 18 * mm, 10 * mm, f"pagina {doc.page}")
+        canvas.drawRightString(A4[0] - 18 * mm, 10 * mm, f"page {doc.page}")
         canvas.restoreState()
 
     path = Path(path)
@@ -146,10 +146,10 @@ def _single_page(draw) -> bytes:
 def _cover(number: int, item: dict, note: str = "") -> bytes:
     def draw(page):
         page.setFont("Helvetica-Bold", 16)
-        page.drawString(60, A4_H - 120, f"Allegato {number}")
+        page.drawString(60, A4_H - 120, f"Attachment {number}")
         page.setFont("Helvetica", 11)
         page.drawString(60, A4_H - 145, item["name"][:90])
-        page.drawString(60, A4_H - 163, f"dal messaggio {item['message']} della conversazione")
+        page.drawString(60, A4_H - 163, f"from message {item['message']} of the conversation")
         if note:
             page.setFillColorRGB(0.6, 0, 0)
             page.drawString(60, A4_H - 190, note[:100])
@@ -192,16 +192,16 @@ def _append_attachments(path: Path, embedded: list, thread: dict) -> None:
             if item["kind"] == "pdf":
                 reader = PdfReader(io.BytesIO(item["data"]))
                 if reader.is_encrypted and not reader.decrypt(""):
-                    raise ValueError("PDF protetto da password")
+                    raise ValueError("password-protected PDF")
                 pages = [_fit_to_a4(page) for page in reader.pages]
             else:
                 pages = list(PdfReader(io.BytesIO(_image_page(item["data"]))).pages)
             note = ""
         except Exception as exc:                          # corrupt or unsupported attachment: say so, keep going
-            pages, note = [], f"non incorporabile: {exc}"
+            pages, note = [], f"cannot be embedded: {exc}"
         cover = PdfReader(io.BytesIO(_cover(number, item, note))).pages[0]
         writer.add_page(cover)
-        writer.add_outline_item(f"Allegato {number}: {item['name']}", len(writer.pages) - 1)
+        writer.add_outline_item(f"Attachment {number}: {item['name']}", len(writer.pages) - 1)
         for page in pages:
             writer.add_page(page)
     with open(path, "wb") as handle:

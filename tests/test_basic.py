@@ -367,14 +367,14 @@ def _report(num, date, role_kind, original_id, subject, sender, to="b@pec.test",
 class ThreadsTest(unittest.TestCase):
     def test_sent_receipts_and_reply_are_grouped(self):
         reports = [
-            _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<a@x>", "Richiesta", "me@pec.test"),
-            _report("2", "Mon, 02 Nov 2026 10:00:05 +0100", "pec", "<a@x>", "ACCETTAZIONE: Richiesta",
+            _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<a@x>", "Request", "me@pec.test"),
+            _report("2", "Mon, 02 Nov 2026 10:00:05 +0100", "pec", "<a@x>", "ACCETTAZIONE: Request",
                     "posta-certificata@p", receipt="accettazione"),
-            _report("3", "Mon, 02 Nov 2026 10:01:00 +0100", "pec", "<a@x>", "CONSEGNA: Richiesta",
+            _report("3", "Mon, 02 Nov 2026 10:01:00 +0100", "pec", "<a@x>", "CONSEGNA: Request",
                     "posta-certificata@p", receipt="avvenuta-consegna"),
-            _report("4", "Tue, 03 Nov 2026 09:00:00 +0100", "pec", "<b@x>", "Re: Richiesta", "Other <b@pec.test>",
+            _report("4", "Tue, 03 Nov 2026 09:00:00 +0100", "pec", "<b@x>", "Re: Request", "Other <b@pec.test>",
                     to="me@pec.test", refs=["a@x"]),
-            _report("5", "Tue, 03 Nov 2026 11:00:00 +0100", "pec", "<z@x>", "Altro", "c@pec.test", to="me@pec.test"),
+            _report("5", "Tue, 03 Nov 2026 11:00:00 +0100", "pec", "<z@x>", "Other", "c@pec.test", to="me@pec.test"),
         ]
         result = threads.build_threads(reports, "ME@pec.test")
         self.assertEqual([t["id"] for t in result], ["t1", "t2"])
@@ -383,23 +383,23 @@ class ThreadsTest(unittest.TestCase):
         self.assertEqual([m["role"] for m in first["messages"]], ["sent", "receipt", "receipt", "received"])
         self.assertEqual(first["counts"], {"sent": 1, "received": 1, "receipts": 2, "other": 0})
         self.assertEqual(first["receipts"], ["accettazione", "avvenuta-consegna"])
-        self.assertEqual(first["subject"], "Richiesta")
+        self.assertEqual(first["subject"], "Request")
         self.assertEqual([m["id"] for m in second["messages"]], ["5"])
-        self.assertIn("[t1] Richiesta", "\n".join(threads.thread_lines(result)))
+        self.assertIn("[t1] Request", "\n".join(threads.thread_lines(result)))
 
     def test_sent_copy_with_other_id_and_rewritten_original_are_merged(self):
-        sent = _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<copy@x>", "Richiesta", "me@pec.test",
+        sent = _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<copy@x>", "Request", "me@pec.test",
                        to="school@pec.test")
-        accept = _report("2", "Mon, 02 Nov 2026 10:00:02 +0100", "pec", "", "ACCETTAZIONE: Richiesta",
+        accept = _report("2", "Mon, 02 Nov 2026 10:00:02 +0100", "pec", "", "ACCETTAZIONE: Request",
                          "posta-certificata@p", to="me@pec.test", receipt="accettazione")
         accept["threading"] = threads.threading_info("<o2@p>", "", "", "<sub@x>", [])
-        delivered = _report("3", "Mon, 02 Nov 2026 10:00:04 +0100", "pec", "<rewritten@p>", "CONSEGNA: Richiesta",
+        delivered = _report("3", "Mon, 02 Nov 2026 10:00:04 +0100", "pec", "<rewritten@p>", "CONSEGNA: Request",
                             "posta-certificata@p", to="me@pec.test", receipt="avvenuta-consegna")
-        delivered["original_message"] = {"from": "me@pec.test", "to": "school@pec.test", "subject": "Richiesta"}
+        delivered["original_message"] = {"from": "me@pec.test", "to": "school@pec.test", "subject": "Request"}
         delivered["threading"] = threads.threading_info("<o3@p>", "<rewritten@p>", "", "<sub@x>", [])
-        again = _report("4", "Fri, 06 Nov 2026 10:00:00 +0100", "not_certified", "<copy2@x>", "Richiesta", "me@pec.test",
+        again = _report("4", "Fri, 06 Nov 2026 10:00:00 +0100", "not_certified", "<copy2@x>", "Request", "me@pec.test",
                         to="school@pec.test")
-        other = _report("5", "Fri, 06 Nov 2026 11:00:00 +0100", "not_certified", "<o@x>", "Richiesta", "me@pec.test",
+        other = _report("5", "Fri, 06 Nov 2026 11:00:00 +0100", "not_certified", "<o@x>", "Request", "me@pec.test",
                         to="someone-else@pec.test")
         result = threads.build_threads([sent, accept, delivered, again, other], "me@pec.test")
         self.assertEqual([[m["id"] for m in t["messages"]] for t in result], [["1", "2", "3", "4"], ["5"]])

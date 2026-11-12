@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not paste passwords, mailbox addresses, message contents or attachments.** The output of
+        pec-inspector contains mail metadata (addresses, subjects, local paths): replace them with placeholders
+        such as `user@example-pec.test` before posting. Security problems: see SECURITY.md, do not use a public issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The command line you ran (never include a password; it is not accepted on the command line anyway).
+      render: shell
+      placeholder: pec-inspector out/ --mailbox INBOX --search "..." --thread
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or error (anonymised)
+      description: Add `-v` for discovery details.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: pec-inspector version
+      description: Output of `pec-inspector --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, Linux, macOS, Other]
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version and install method
+      placeholder: "3.13, install script / pip / standalone executable"
+  - type: input
+    id: provider
+    attributes:
+      label: PEC / REM provider (optional)
+      description: Helps with provider-specific message formats and IMAP server discovery.
