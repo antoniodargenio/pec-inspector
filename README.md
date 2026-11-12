@@ -183,13 +183,16 @@ Unless you pass `--imap-host`, the server is found from the address domain, in t
 1. DNS SRV records `_imaps._tcp` / `_imap._tcp` (RFC 6186) — needs `dnspython`;
 2. Mozilla autoconfig published by the domain (`https://autoconfig.<domain>/mail/config-v1.1.xml`,
    `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`);
-3. the same autoconfig on the domains of the MX hosts (PEC addresses on a custom domain are usually hosted by a
-   provider that publishes the configuration) — needs `dnspython`;
+3. the same lookups on the domains of the MX hosts — SRV records, then autoconfig (PEC addresses on a custom domain are
+   usually hosted by a provider that publishes the configuration) — needs `dnspython`;
 4. the Thunderbird ISP database (only the domain is sent; disable with `--no-ispdb`);
-5. with `--probe`, common host names (`imap.<domain>`, `imaps.<domain>`, `mail.<domain>`, `pec.<domain>`) on port 993.
+5. common host names (`imap.<domain>`, `imaps.<domain>`, `mail.<domain>`, `pec.<domain>`) on port 993: always on the
+   MX domains (the provider that hosts the mailbox), on the address domain itself only with `--probe`.
 
-Many PEC providers publish neither SRV records nor an autoconfig file; for those, `--probe` (which also tries the
-MX provider's domain) or an explicit `--imap-host` is needed.
+Many PEC providers publish neither SRV records nor an autoconfig file; for those the MX-domain probe (step 5, needs
+`dnspython`) usually finds the server, otherwise `--probe` (also tries the address domain) or an explicit `--imap-host`
+is needed. As the password is sent to whatever server is found, check the host printed before login (or use
+`--discover-only`) and prefer `--imap-host` for sensitive accounts.
 If nothing is found, pass `--imap-host HOST [--imap-port N] [--imap-security ssl|starttls]`.
 `--discover-only` prints the server and exits without logging in, `-v` shows what was tried.
 Only TLS connections (implicit or STARTTLS, with certificate verification) are used. Microsoft Autodiscover is not implemented.

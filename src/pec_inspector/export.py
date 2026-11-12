@@ -121,6 +121,11 @@ def read_parts(msg) -> dict:
             htmls[min(level, 1)].append(_decode(part))
 
     walk(msg, 0)
+    if not original:                      # no PEC envelope (e.g. a copy in Sent): files are real attachments, except
+        kept = []                         # the certification parts of a receipt
+        for name, data in pec_files:
+            (kept if name.lower() in ("daticert.xml", "smime.p7s") else attachments).append((name, data))
+        pec_files[:] = kept
 
     main, body_level = (original[0], 1) if original else (msg, 0)
     body_html = "\n".join(htmls[body_level])

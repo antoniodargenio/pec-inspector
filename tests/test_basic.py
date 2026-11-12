@@ -90,6 +90,44 @@ class DiscoveryTest(unittest.TestCase):
                 discovery.split_address(bad)
 
 
+class MxDiscoveryTest(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self.patches = [mock.patch.object(discovery, "_srv", lambda name, timeout: []),
+                        mock.patch.object(discovery, "_fetch_autoconfig", lambda *a, **k: []),
+                        mock.patch.object(discovery.netsafe, "http_get", lambda *a, **k: None),
+                        mock.patch.object(discovery, "_mx_hosts", lambda domain, timeout: ["mx1.mail.provider.test"])]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_mx_domains_are_probed_without_probe_flag(self):
+        asked = []
+
+        def fake_probe(domains, timeout):
+            asked.append(list(domains))
+            return [discovery.ImapServer("imaps.provider.test", 993, "ssl", "probe")]
+        with self.mock.patch.object(discovery, "_probe", fake_probe):
+            found = discovery.discover("me@custom.test", use_ispdb=False)
+        self.assertEqual(found[0].host, "imaps.provider.test")
+        self.assertEqual(asked, [["mail.provider.test", "provider.test"]])      # the address domain is not probed
+
+    def test_probe_flag_adds_the_address_domain(self):
+        asked = []
+        with self.mock.patch.object(discovery, "_probe", lambda d, t: asked.append(list(d)) or []):
+            self.assertEqual(discovery.discover("me@custom.test", use_ispdb=False, probe=True), [])
+        self.assertEqual(asked[0][0], "custom.test")
+
+    def test_srv_on_mx_domain(self):
+        def srv(name, timeout):
+            return [("imap.provider.test", 993)] if name == "_imaps._tcp.mail.provider.test" else []
+        with self.mock.patch.object(discovery, "_srv", srv):
+            found = discovery.discover("me@custom.test", use_ispdb=False)
+        self.assertEqual((found[0].host, found[0].security), ("imap.provider.test", "ssl"))
+        self.assertIn("MX domain", found[0].source)
+
+
 class NetsafeTest(unittest.TestCase):
     def test_private_and_bad_scheme_refused(self):
         netsafe.set_allow_private(False)
@@ -348,6 +386,23 @@ class ThreadsTest(unittest.TestCase):
         self.assertEqual(first["subject"], "Richiesta")
         self.assertEqual([m["id"] for m in second["messages"]], ["5"])
         self.assertIn("[t1] Richiesta", "\n".join(threads.thread_lines(result)))
+
+    def test_sent_copy_with_other_id_and_rewritten_original_are_merged(self):
+        sent = _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<copy@x>", "Richiesta", "me@pec.test",
+                       to="school@pec.test")
+        accept = _report("2", "Mon, 02 Nov 2026 10:00:02 +0100", "pec", "", "ACCETTAZIONE: Richiesta",
+                         "posta-certificata@p", to="me@pec.test", receipt="accettazione")
+        accept["threading"] = threads.threading_info("<o2@p>", "", "", "<sub@x>", [])
+        delivered = _report("3", "Mon, 02 Nov 2026 10:00:04 +0100", "pec", "<rewritten@p>", "CONSEGNA: Richiesta",
+                            "posta-certificata@p", to="me@pec.test", receipt="avvenuta-consegna")
+        delivered["original_message"] = {"from": "me@pec.test", "to": "school@pec.test", "subject": "Richiesta"}
+        delivered["threading"] = threads.threading_info("<o3@p>", "<rewritten@p>", "", "<sub@x>", [])
+        again = _report("4", "Fri, 06 Nov 2026 10:00:00 +0100", "not_certified", "<copy2@x>", "Richiesta", "me@pec.test",
+                        to="school@pec.test")
+        other = _report("5", "Fri, 06 Nov 2026 11:00:00 +0100", "not_certified", "<o@x>", "Richiesta", "me@pec.test",
+                        to="someone-else@pec.test")
+        result = threads.build_threads([sent, accept, delivered, again, other], "me@pec.test")
+        self.assertEqual([[m["id"] for m in t["messages"]] for t in result], [["1", "2", "3", "4"], ["5"]])
 
     def test_without_address_role_is_unknown(self):
         result = threads.build_threads([_report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "pec", "<a@x>", "S", "a@p")])

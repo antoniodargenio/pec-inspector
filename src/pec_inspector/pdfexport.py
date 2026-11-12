@@ -6,6 +6,8 @@ used, so text outside Latin-1/WinAnsi (e.g. Cyrillic, CJK) is not rendered. Atta
 from __future__ import annotations
 
 import email
+import hashlib
+import io
 from email import policy
 from pathlib import Path
 from typing import Dict
@@ -14,6 +16,8 @@ from xml.sax.saxutils import escape
 from . import export
 
 MAX_BODY_CHARS = 20000          # a very long body is cut, with a note, to keep the PDF readable
+
+A4_W, A4_H = 595.2756, 841.8898        # points
 
 ROLE_LABELS = {"sent": "INVIATO", "received": "RICEVUTO", "receipt": "RICEVUTA", "message": "MESSAGGIO"}
 
@@ -54,6 +58,14 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
              Paragraph(_paragraph_text(f"Dal {thread['first_date']} al {thread['last_date']}"), meta),
              Spacer(1, 4), HRFlowable(width="100%", color=colors.grey)]
 
+    embedded: list = []                  # attachments to append at the end, each distinct file once
+    seen: dict = {}
+    try:
+        import pypdf  # noqa: F401
+        pypdf_ok = True
+    except ImportError:
+        pypdf_ok = False
+
     for number, entry in enumerate(thread["messages"], 1):
         label = ROLE_LABELS.get(entry["role"], entry["role"].upper())
         if entry["receipt"]:
@@ -67,7 +79,19 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
         if eml and Path(eml).is_file():
             parts = export.read_parts(email.message_from_bytes(Path(eml).read_bytes(), policy=policy.default))
             text = parts["body_text"] or parts["wrapper"]
-            names = [name for name, _ in parts["attachments"]]
+            for name, data in parts["attachments"]:
+                digest = hashlib.sha256(data).hexdigest()
+                if digest in seen:
+                    names.append(f"{name} (stesso file dell'allegato {seen[digest]})")
+                    continue
+                kind = _kind(data)
+                if kind and pypdf_ok:
+                    embedded.append({"name": name, "data": data, "kind": kind, "message": number})
+                    seen[digest] = f"{len(embedded)}"
+                    names.append(f"{name} (incorporato come allegato {len(embedded)})")
+                else:
+                    seen[digest] = name
+                    names.append(f"{name} (non incorporato: " + ("formato non supportato" if pypdf_ok else "manca pypdf") + ")")
         if len(text) > MAX_BODY_CHARS:
             text = text[:MAX_BODY_CHARS] + "\n[... testo troncato ...]"
         block.append(Paragraph(_paragraph_text(text.strip() or "(nessun testo)"), body))
@@ -86,4 +110,90 @@ def write_thread_pdf(thread: dict, reports: Dict[str, dict], path) -> Path:
     SimpleDocTemplate(str(path), pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=16 * mm,
                       bottomMargin=18 * mm, title=subject, author="pec-inspector").build(
         story, onFirstPage=footer, onLaterPages=footer)
+    if embedded:
+        _append_attachments(path, embedded, thread)
     return path
+
+
+def _kind(data: bytes):
+    if data[:1024].lstrip().startswith(b"%PDF"):
+        return "pdf"
+    if data[:4] == b"\x89PNG" or data[:3] == b"\xff\xd8\xff":
+        return "image"
+    return None
+
+
+def _single_page(draw) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    buffer = io.BytesIO()
+    page = canvas.Canvas(buffer, pagesize=A4)
+    draw(page)
+    page.showPage()
+    page.save()
+    return buffer.getvalue()
+
+
+def _cover(number: int, item: dict, note: str = "") -> bytes:
+    def draw(page):
+        page.setFont("Helvetica-Bold", 16)
+        page.drawString(60, A4_H - 120, f"Allegato {number}")
+        page.setFont("Helvetica", 11)
+        page.drawString(60, A4_H - 145, item["name"][:90])
+        page.drawString(60, A4_H - 163, f"dal messaggio {item['message']} della conversazione")
+        if note:
+            page.setFillColorRGB(0.6, 0, 0)
+            page.drawString(60, A4_H - 190, note[:100])
+    return _single_page(draw)
+
+
+def _image_page(data: bytes) -> bytes:
+    from reportlab.lib.utils import ImageReader
+
+    def draw(page):
+        image = ImageReader(io.BytesIO(data))
+        w, h = image.getSize()
+        margin = 28
+        scale = min((A4_W - 2 * margin) / w, (A4_H - 2 * margin) / h)
+        page.drawImage(image, (A4_W - w * scale) / 2, (A4_H - h * scale) / 2, w * scale, h * scale)
+    return _single_page(draw)
+
+
+def _fit_to_a4(page):
+    """A new A4 page carrying ``page`` scaled to fit and centred."""
+    from pypdf import PageObject, Transformation
+    page.transfer_rotation_to_content()
+    left, bottom = float(page.mediabox.left), float(page.mediabox.bottom)
+    width, height = float(page.mediabox.width), float(page.mediabox.height)
+    scale = min(A4_W / width, A4_H / height)
+    blank = PageObject.create_blank_page(width=A4_W, height=A4_H)
+    blank.merge_transformed_page(page, Transformation().translate(-left, -bottom).scale(scale)
+                                 .translate((A4_W - width * scale) / 2, (A4_H - height * scale) / 2))
+    return blank
+
+
+def _append_attachments(path: Path, embedded: list, thread: dict) -> None:
+    """Append the attachments after the messages: a cover page, then the pages of each file scaled to A4."""
+    from pypdf import PdfReader, PdfWriter
+    writer = PdfWriter()
+    for page in PdfReader(str(path)).pages:
+        writer.add_page(page)
+    for number, item in enumerate(embedded, 1):
+        try:
+            if item["kind"] == "pdf":
+                reader = PdfReader(io.BytesIO(item["data"]))
+                if reader.is_encrypted and not reader.decrypt(""):
+                    raise ValueError("PDF protetto da password")
+                pages = [_fit_to_a4(page) for page in reader.pages]
+            else:
+                pages = list(PdfReader(io.BytesIO(_image_page(item["data"]))).pages)
+            note = ""
+        except Exception as exc:                          # corrupt or unsupported attachment: say so, keep going
+            pages, note = [], f"non incorporabile: {exc}"
+        cover = PdfReader(io.BytesIO(_cover(number, item, note))).pages[0]
+        writer.add_page(cover)
+        writer.add_outline_item(f"Allegato {number}: {item['name']}", len(writer.pages) - 1)
+        for page in pages:
+            writer.add_page(page)
+    with open(path, "wb") as handle:
+        writer.write(handle)

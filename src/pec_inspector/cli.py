@@ -51,7 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     srv.add_argument("--imap-security", choices=("ssl", "starttls"), help="ssl = implicit TLS (default), starttls")
     srv.add_argument("--discover-only", action="store_true", help="print the discovered server and exit (no login)")
     srv.add_argument("--no-ispdb", action="store_true", help="do not query the Thunderbird ISP database during discovery")
-    srv.add_argument("--probe", action="store_true", help="as a last resort, probe common host names (imap.<domain>, ...)")
+    srv.add_argument("--probe", action="store_true", help="as a last resort, also probe common host names of the address domain itself (imap.<domain>, ...); "
+                          "those of the MX domains are always probed")
     srv.add_argument("--timeout", type=float, default=40, help="network timeout in seconds (default: 40)")
 
     sel = p.add_argument_group("message selection (default: the last --limit messages)")
@@ -379,6 +380,9 @@ def summarise(reports: List[dict]) -> dict:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     as_json = args.json
+    for stream in (sys.stdout, sys.stderr):              # never crash on characters the console cannot encode
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if as_json and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")        # JSON is always UTF-8, whatever the console code page
 

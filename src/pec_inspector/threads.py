@@ -6,8 +6,9 @@ Messages are linked through the ``Message-ID`` of the *original* message, which 
 * every PEC receipt (``X-Riferimento-Message-ID`` header, ``<msgid>`` of ``daticert.xml``),
 
 and through the ``In-Reply-To`` / ``References`` headers of the original, so that replies join the
-conversation they answer. Nothing is guessed from subjects: two messages are in the same conversation only if
-they share at least one of these identifiers.
+conversation they answer. Mail clients may save a sent copy under a different ``Message-ID`` than the one actually submitted, so groups
+that share a subject (ignoring ``Re:`` and receipt prefixes) *and* a correspondent address are merged as well; this
+second step needs the mailbox address and is a heuristic.
 """
 from __future__ import annotations
 
@@ -41,7 +42,9 @@ def threading_info(own_id: str, original_id: str, daticert_id: str, reference_id
     key = (formats.normalize_id(original_id) or formats.normalize_id(reference_id)
            or formats.normalize_id(daticert_id) or own)
     refs = [r for r in dict.fromkeys(references) if r and r != key]
-    return {"message_id": own or None, "original_message_id": key or None, "references": refs}
+    ids = [i for i in dict.fromkeys([key, formats.normalize_id(original_id), formats.normalize_id(reference_id),
+                                     formats.normalize_id(daticert_id)]) if i]
+    return {"message_id": own or None, "original_message_id": key or None, "ids": ids, "references": refs}
 
 
 def _when(value: str) -> datetime:
@@ -111,12 +114,30 @@ def build_threads(reports: List[dict], address: Optional[str] = None) -> List[di
     owner: Dict[str, int] = {}
     for index, report in enumerate(reports):
         info = report.get("threading") or {}
-        keys = [info.get("original_message_id")] + list(info.get("references") or [])
+        keys = list(info.get("ids") or [info.get("original_message_id")]) + list(info.get("references") or [])
         for key in filter(None, keys):
             if key in owner:
                 parent[find(index)] = find(owner[key])
             else:
                 owner[key] = index
+
+    # Second pass (heuristic): a mail client may save a sent copy under a different Message-ID than the one actually
+    # submitted, so groups with the same subject and a common correspondent are merged too.
+    own = (address or "").lower()
+    seen: Dict[tuple, int] = {}
+    if own:
+        for index, report in enumerate(reports):
+            original = report.get("original_message") or {}
+            subject = _clean_subject(original.get("subject") or report.get("subject") or "").lower()
+            people = _addresses(original.get("from") or report.get("from")) | _addresses(original.get("to") or report.get("to"))
+            for person in people:
+                if person == own or person.startswith("posta-certificata@") or not subject:
+                    continue
+                key = (subject, person)
+                if key in seen:
+                    parent[find(index)] = find(seen[key])
+                else:
+                    seen[key] = index
 
     groups: Dict[int, List[int]] = {}
     for index in range(len(reports)):

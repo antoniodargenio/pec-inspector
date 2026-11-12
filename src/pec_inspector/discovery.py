@@ -7,12 +7,13 @@ Methods, tried in this order until one yields a result:
 2. **Mozilla autoconfig** published by the mail provider:
    ``https://autoconfig.<domain>/mail/config-v1.1.xml`` and
    ``https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`` (HTTPS only).
-3. The same autoconfig lookup on the domains of the **MX hosts** (a PEC address often lives on a custom
-   domain whose mail is hosted by a provider that publishes the configuration).  Needs ``dnspython``.
+3. The same lookups on the domains of the **MX hosts** (a PEC address often lives on a custom domain whose mail
+   is hosted by a provider that publishes the configuration): SRV records, then autoconfig.  Needs ``dnspython``.
 4. The **Thunderbird ISP database** (``https://autoconfig.thunderbird.net/v1.1/<domain>``), for the address
    domain and the MX domains.  Only the domain name is sent, never the address.  Disable with ``use_ispdb=False``.
-5. Optionally (``probe=True``) guessing common host names (``imap.<d>``, ``imaps.<d>``, ``mail.<d>``,
-   ``pec.<d>``) and checking for a TLS IMAP server on port 993.
+5. Guessing common host names (``imap.<d>``, ``imaps.<d>``, ``mail.<d>``, ``pec.<d>``) and checking for a TLS
+   IMAP server on port 993: always on the MX domains (the provider that hosts the mailbox), and on the address
+   domain itself only with ``probe=True``.
 
 Microsoft Autodiscover (POX/SCP) is not implemented.
 
@@ -140,6 +141,7 @@ def _fetch_autoconfig(domain, address, source, timeout, send_address=True):
 
 
 def _probe(domains, timeout):
+    """First TLS IMAP server answering on a common host name of one of ``domains`` (port 993)."""
     context = ssl.create_default_context()
     for domain in domains:
         for prefix in ("imap", "imaps", "mail", "pec"):
@@ -150,7 +152,7 @@ def _probe(domains, timeout):
                 with socket.create_connection((host, 993), timeout=timeout) as raw:
                     with context.wrap_socket(raw, server_hostname=host) as tls:
                         if tls.recv(64).startswith(b"* OK"):
-                            return [ImapServer(host, 993, "ssl", "probe of common host names")]
+                            return [ImapServer(host, 993, "ssl", f"probe of common host names on {domain}")]
             except OSError:
                 continue
     return []
@@ -186,6 +188,13 @@ def discover(address: str, timeout: float = 8, use_ispdb: bool = True, probe: bo
             if parent != domain and parent not in mx_domains:
                 mx_domains.append(parent)
     mx_domains = mx_domains[:4]
+    for candidate in mx_domains:                       # RFC 6186 SRV records published by the hosting provider
+        for label, security in (("_imaps._tcp", "ssl"), ("_imap._tcp", "starttls")):
+            for host, port in _srv(f"{label}.{candidate}", timeout):
+                found.append(ImapServer(host, port, security, f"DNS SRV {label}.{candidate} (MX domain)"))
+        if found:
+            log(f"SRV records found on the MX domain {candidate}")
+            return found
     for candidate in mx_domains:
         found = _fetch_autoconfig(candidate, address, f"autoconfig of MX domain {candidate}", timeout,
                                   send_address=False)
@@ -204,10 +213,11 @@ def discover(address: str, timeout: float = 8, use_ispdb: bool = True, probe: bo
                 return found
         log("not in the Thunderbird ISP database")
 
-    # 5. educated guesses
-    if probe:
-        found = _probe([domain] + mx_domains, min(timeout, 5))
+    # 5. educated guesses: the MX domains always, the address domain only on request
+    targets = ([domain] if probe else []) + mx_domains
+    if targets:
+        found = _probe(targets, min(timeout, 5))
         if found:
             return found
-        log("no IMAP server found by probing")
+        log("no IMAP server found by probing " + ", ".join(targets))
     return []
