@@ -41,6 +41,8 @@ Options (same meaning in both): `--extras core|dns|xsd|all` / `-Extras ...` (def
 `--venv DIR` / `-VenvDir DIR`, `--no-venv` / `-NoVenv` (use the current environment), `--editable` / `-Editable`
 (development install), `--python BIN` / `-Python BIN`. They can be run again safely.
 
+**Building** a wheel or a standalone executable (Linux and Windows): see [BUILDING.md](BUILDING.md).
+
 **Manually.** Run **one** of these from the repository root (they are alternatives, not steps):
 
 ```sh

@@ -22,3 +22,5 @@ credentials*.tsv
 out/
 output/
 pec-out/
+*.spec
+entry.py
