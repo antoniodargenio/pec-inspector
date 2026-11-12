@@ -23,13 +23,20 @@ Nothing is flagged as read, moved or deleted: the folder is opened read-only and
 
 Requires Python 3.9+ and the `openssl` command line tool (used for CMS/S-MIME/OCSP verification) in `PATH`.
 
+The package is not published on PyPI: install it from a clone of this repository, preferably in a virtual
+environment. Run **one** of these from the repository root (they are alternatives, not steps):
+
 ```sh
-pip install .                 # core: cryptography
-pip install ".[dns]"          # + dnspython: SRV/MX based IMAP discovery
-pip install ".[all]"          # + lxml: XSD validation of REM evidence
+python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
+
+pip install .            # core only (cryptography)
+pip install ".[dns]"     # core + dnspython: SRV/MX based IMAP discovery
+pip install ".[xsd]"     # core + lxml: XSD validation of REM evidence
+pip install ".[all]"     # core + dnspython + lxml
 ```
 
-You can also run it without installing: `PYTHONPATH=src python -m pec_inspector ...`.
+This installs the `pec-inspector` command. You can also run it without installing:
+`PYTHONPATH=src python -m pec_inspector ...` (on Windows PowerShell: `$env:PYTHONPATH="src"`).
 
 ## Quick start
 
