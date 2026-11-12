@@ -24,7 +24,24 @@ Nothing is flagged as read, moved or deleted: the folder is opened read-only and
 Requires Python 3.9+ and the `openssl` command line tool (used for CMS/S-MIME/OCSP verification) in `PATH`.
 
 The package is not published on PyPI: install it from a clone of this repository, preferably in a virtual
-environment. Run **one** of these from the repository root (they are alternatives, not steps):
+environment.
+
+**Easiest: the install scripts.** They create (or reuse) a virtual environment in `.venv`, install the package
+with every Python dependency (`cryptography`, `dnspython`, `lxml`), and check that `openssl` is available
+(they never install system software or use `sudo`; they only tell you what is missing):
+
+```sh
+scripts/install.sh                    # Linux, macOS, Git Bash, WSL
+```
+```powershell
+.\scripts\install.ps1                 # Windows PowerShell 5.1+ / PowerShell 7+
+```
+
+Options (same meaning in both): `--extras core|dns|xsd|all` / `-Extras ...` (default `all`),
+`--venv DIR` / `-VenvDir DIR`, `--no-venv` / `-NoVenv` (use the current environment), `--editable` / `-Editable`
+(development install), `--python BIN` / `-Python BIN`. They can be run again safely.
+
+**Manually.** Run **one** of these from the repository root (they are alternatives, not steps):
 
 ```sh
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate

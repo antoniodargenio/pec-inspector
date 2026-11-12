@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "setuptools-scm>=8"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ dynamic = ["version"]          # from the git tag vX.Y.Z (setuptools-scm)
 description = "Read-only download and verification of Italian PEC / REM messages: receipts, signatures, trust chains, OCSP/CRL"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { file = "LICENSE.md" }
+license = "MIT"
+license-files = ["LICENSE.md"]
 dependencies = ["cryptography>=45"]
 keywords = ["pec", "rem", "certified-email", "imap", "smime", "cades", "pades", "ocsp"]
 classifiers = [
