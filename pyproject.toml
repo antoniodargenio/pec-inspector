@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pec-inspector"
+version = "0.1.0"
+description = "Read-only download and verification of Italian PEC / REM messages: receipts, signatures, trust chains, OCSP/CRL"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE.md" }
+dependencies = ["cryptography>=45"]
+keywords = ["pec", "rem", "certified-email", "imap", "smime", "cades", "pades", "ocsp"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: Console",
+    "Topic :: Communications :: Email",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.optional-dependencies]
+dns = ["dnspython>=2.4"]     # SRV / MX based IMAP auto-discovery
+xsd = ["lxml>=5"]            # XSD validation of REM evidence
+all = ["dnspython>=2.4", "lxml>=5"]
+
+[project.scripts]
+pec-inspector = "pec_inspector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

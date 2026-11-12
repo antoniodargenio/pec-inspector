@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Secrets and real mail: never commit these
+.env
+*.env
+credentials*.tsv
+!credentials.example.tsv
+*.eml
+*.p7m
+*.p7s
+*.pem
+!tests/**/*.pem
+
+# Output directories of local runs
+out/
+output/
+pec-out/
