@@ -22,7 +22,8 @@ classifiers = [
 [project.optional-dependencies]
 dns = ["dnspython>=2.4"]     # SRV / MX based IMAP auto-discovery
 xsd = ["lxml>=5"]            # XSD validation of REM evidence
-all = ["dnspython>=2.4", "lxml>=5"]
+pdf = ["reportlab>=4"]          # --thread-pdf: conversations as A4 PDF
+all = ["dnspython>=2.4", "lxml>=5", "reportlab>=4"]
 
 [project.scripts]
 pec-inspector = "pec_inspector.cli:main"

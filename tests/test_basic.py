@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pki   # noqa: E402
+from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pki, threads   # noqa: E402
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 CRLF = bytes([13, 10])
@@ -319,6 +319,41 @@ class OutputDirectoryTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(target, "msg_file.eml")))
 
 
+def _report(num, date, role_kind, original_id, subject, sender, to="b@pec.test", receipt=None, refs=()):
+    return {"id": num, "date": date, "subject": subject, "from": sender, "to": to, "kind": role_kind,
+            "headers": {"x_ricevuta": receipt, "x_trasporto": None}, "rem": None, "daticert": None, "evidence": [],
+            "original_message": None,
+            "threading": threads.threading_info("<own%s@p>" % num, original_id, "", "", refs)}
+
+
+class ThreadsTest(unittest.TestCase):
+    def test_sent_receipts_and_reply_are_grouped(self):
+        reports = [
+            _report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "not_certified", "<a@x>", "Richiesta", "me@pec.test"),
+            _report("2", "Mon, 02 Nov 2026 10:00:05 +0100", "pec", "<a@x>", "ACCETTAZIONE: Richiesta",
+                    "posta-certificata@p", receipt="accettazione"),
+            _report("3", "Mon, 02 Nov 2026 10:01:00 +0100", "pec", "<a@x>", "CONSEGNA: Richiesta",
+                    "posta-certificata@p", receipt="avvenuta-consegna"),
+            _report("4", "Tue, 03 Nov 2026 09:00:00 +0100", "pec", "<b@x>", "Re: Richiesta", "Other <b@pec.test>",
+                    to="me@pec.test", refs=["a@x"]),
+            _report("5", "Tue, 03 Nov 2026 11:00:00 +0100", "pec", "<z@x>", "Altro", "c@pec.test", to="me@pec.test"),
+        ]
+        result = threads.build_threads(reports, "ME@pec.test")
+        self.assertEqual([t["id"] for t in result], ["t1", "t2"])
+        first, second = result
+        self.assertEqual([m["id"] for m in first["messages"]], ["1", "2", "3", "4"])
+        self.assertEqual([m["role"] for m in first["messages"]], ["sent", "receipt", "receipt", "received"])
+        self.assertEqual(first["counts"], {"sent": 1, "received": 1, "receipts": 2, "other": 0})
+        self.assertEqual(first["receipts"], ["accettazione", "avvenuta-consegna"])
+        self.assertEqual(first["subject"], "Richiesta")
+        self.assertEqual([m["id"] for m in second["messages"]], ["5"])
+        self.assertIn("[t1] Richiesta", "\n".join(threads.thread_lines(result)))
+
+    def test_without_address_role_is_unknown(self):
+        result = threads.build_threads([_report("1", "Mon, 02 Nov 2026 10:00:00 +0100", "pec", "<a@x>", "S", "a@p")])
+        self.assertEqual(result[0]["messages"][0]["role"], "message")
+
+
 class JsonOutputTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -354,6 +389,27 @@ class JsonOutputTest(unittest.TestCase):
         self.assertEqual(doc["summary"], {"messages": 1, "messages_with_warnings": 1, "invalid_signatures": 0})
         self.assertTrue(os.path.isdir(message["export"]["folder"]))
         self.assertIn("download folder", err)               # diagnostics stay on stderr
+
+    def test_thread_option_adds_threads(self):
+        import json
+        code, out, _ = self.run_json(os.path.join(self.tmp.name, "o"), "--eml", self.eml, "--no-revocation",
+                                     "--thread", "--json")
+        self.assertEqual(code, 0)
+        doc = json.loads(out)
+        thread, = doc["threads"]
+        self.assertEqual([m["id"] for m in thread["messages"]], ["file"])
+        self.assertIn("threading", doc["messages"][0])
+
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("reportlab"), "reportlab not installed")
+    def test_thread_pdf_is_a4(self):
+        import json
+        code, out, _ = self.run_json(os.path.join(self.tmp.name, "o"), "--eml", self.eml, "--no-revocation",
+                                     "--thread-pdf", "--json")
+        self.assertEqual(code, 0)
+        pdf = Path(json.loads(out)["threads"][0]["pdf"]).read_bytes()
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"595.27", pdf)                       # MediaBox of A4: 595.28 x 841.89 pt
+        self.assertIn(b"841.88", pdf)
 
     def test_error_is_reported_as_json(self):
         import json

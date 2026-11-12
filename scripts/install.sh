@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install pec-inspector and every Python dependency it needs (Linux / macOS / Git Bash / WSL).
 #
-#   scripts/install.sh                      # venv in ./.venv, extras: all (cryptography, dnspython, lxml)
+#   scripts/install.sh                      # venv in ./.venv, extras: all (cryptography, dnspython, lxml, reportlab)
 #   scripts/install.sh --extras core        # only the required dependency (cryptography)
 #   scripts/install.sh --venv ~/pec-venv    # another virtual environment directory
 #   scripts/install.sh --no-venv            # install into the current Python environment
@@ -33,7 +33,7 @@ while [ $# -gt 0 ]; do
     *) die "unknown option: $1 (try --help)" ;;
   esac
 done
-case "$EXTRAS" in core|dns|xsd|all) ;; *) die "--extras must be one of: core, dns, xsd, all" ;; esac
+case "$EXTRAS" in core|dns|xsd|pdf|all) ;; *) die "--extras must be one of: core, dns, xsd, pdf, all" ;; esac
 
 # 1. a Python >= 3.9
 find_python() {
@@ -80,7 +80,8 @@ fi
 "$PY" - <<'EOF'
 import importlib.util
 for module, role in (("cryptography", "required"), ("dns", "optional: SRV/MX IMAP discovery"),
-                     ("lxml", "optional: XSD validation of REM evidence")):
+                     ("lxml", "optional: XSD validation of REM evidence"),
+                     ("reportlab", "optional: --thread-pdf")):
     state = "ok" if importlib.util.find_spec(module) else "not installed"
     print(f"  {module:<13} {state:<14} ({role})")
 EOF

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import email
 import imaplib
+import importlib.util
 import json
 import os
 import ssl
@@ -15,7 +16,7 @@ from email import policy
 from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, export, formats, netsafe, pki
+from . import __version__, export, formats, netsafe, pdfexport, pki, threads
 from .credentials import CredentialsError, resolve_credentials
 from .discovery import ImapServer, discover
 
@@ -40,7 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     acc.add_argument("--username", help="IMAP login name if different from the address (default: PEC_USERNAME)")
     acc.add_argument("--credentials-file", metavar="FILE", help="TAB-separated 'address<TAB>password[<TAB>host[<TAB>port]]'"
                                                                  " (default: PEC_CREDENTIALS_FILE)")
-    acc.add_argument("--mailbox", default="INBOX", help="IMAP folder to read (default: INBOX)")
+    acc.add_argument("--mailbox", action="append", metavar="FOLDER",
+                     help="IMAP folder to read (default: INBOX); repeat it to read several, e.g. --mailbox INBOX "
+                          "--mailbox 'Sent' (the selection options apply to each folder)")
 
     srv = p.add_argument_group("IMAP server (default: auto-discovery from the address)")
     srv.add_argument("--imap-host", help="server host name (skips auto-discovery)")
@@ -74,6 +77,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also save each message in the clear (decoded text/HTML body) with all its attachments, "
                           "and print the link of the folder (default folder: <out_dir>/export)")
     exp.add_argument("--export-dir", metavar="DIR", help="export folder (implies --export)")
+    exp.add_argument("--thread", action="store_true",
+                     help="group the messages into conversations: sent messages, received messages and their "
+                          "receipts together (linked by Message-ID / X-Riferimento-Message-ID / In-Reply-To); "
+                          "read the Sent folder too with a second --mailbox")
+    exp.add_argument("--thread-pdf", action="store_true",
+                     help="save each conversation as one A4 PDF, messages in chronological order (implies --thread; "
+                          "needs reportlab: pip install 'pec-inspector[pdf]')")
+    exp.add_argument("--pdf-dir", metavar="DIR", help="folder for the conversation PDFs (default: <out_dir>/threads; "
+                                                      "implies --thread-pdf)")
     exp.add_argument("--json", action="store_true",
                      help="print ONE machine-readable JSON document on stdout instead of the text report "
                           "(progress and diagnostics go to stderr; errors are reported as JSON too); "
@@ -153,7 +165,7 @@ class Reporter:
 
 
 # ---------------------------------------------------------------------------------------------
-def analyse_message(num: str, raw: bytes, args, text: bool = True) -> dict:
+def analyse_message(num: str, raw: bytes, args, text: bool = True, folder: Optional[str] = None) -> dict:
     """Unpack and check one message. Prints the text report when ``text`` and always returns the
     structured report (the JSON ``messages[]`` entry)."""
     out_dir = args.out_dir
@@ -167,14 +179,15 @@ def analyse_message(num: str, raw: bytes, args, text: bool = True) -> dict:
     evidences: list = []
     inner_names: list = []
     report: dict = {
-        "id": num, "date": str(msg["Date"] or ""), "subject": str(msg["Subject"] or ""),
+        "id": num, "folder": folder, "date": str(msg["Date"] or ""), "subject": str(msg["Subject"] or ""),
         "from": str(msg["From"] or ""), "to": str(msg["To"] or ""),
         "kind": None,
         "headers": {"x_trasporto": x_transport or None, "x_ricevuta": x_receipt or None},
         "rem": rem or None, "rem_checks": {}, "original_message": None, "daticert": None, "evidence": [],
         "attachments": [], "attachment_signatures": [], "envelope_signature": None,
-        "files": {"envelope_eml": envelope}, "export": None, "warnings": R.warnings,
+        "files": {"envelope_eml": envelope}, "export": None, "threading": None, "warnings": R.warnings,
     }
+    inner_threading: dict = {}
 
     R.say(f"\n=== msg {num} | {msg['Date']} | {msg['Subject']}")
     if rem:
@@ -233,6 +246,8 @@ def analyse_message(num: str, raw: bytes, args, text: bool = True) -> dict:
             inner_names.append(filename)
             Path(out_dir, prefix + name).write_bytes(inner.as_bytes())
             if report["original_message"] is None:
+                inner_threading.update(id=str(inner["Message-ID"] or ""),
+                                       refs=threads.ids_in(inner["In-Reply-To"]) + threads.ids_in(inner["References"]))
                 report["original_message"] = {"filename": filename, "from": str(inner["From"] or ""),
                                               "to": str(inner["To"] or ""), "subject": str(inner["Subject"] or ""),
                                               "date": str(inner["Date"] or ""), "saved_as": os.path.join(out_dir, prefix + name)}
@@ -301,6 +316,11 @@ def analyse_message(num: str, raw: bytes, args, text: bool = True) -> dict:
             R.say("original text:\n", part.get_content()[:3000])
 
     explore(msg, f"{num}_")
+    if not inner_threading:                       # no enclosed original: the message itself (e.g. a copy in Sent)
+        inner_threading.update(id="", refs=threads.ids_in(msg["In-Reply-To"]) + threads.ids_in(msg["References"]))
+    report["threading"] = threads.threading_info(
+        str(msg["Message-ID"] or ""), inner_threading["id"], (report["daticert"] or {}).get("msgid", ""),
+        str(msg.get("X-Riferimento-Message-ID", "") or ""), inner_threading["refs"])
     revocation = not args.no_revocation
     if original_attachments:
         results = pki.check_attachment_signatures(original_attachments, f"{num}_orig_", msg["Date"], args.ca, out_dir,
@@ -384,17 +404,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         temporary = True
     args.out_dir = str(Path(args.out_dir).resolve())   # canonical path (e.g. no 8.3 short names on Windows)
     eprint(f"download folder: {args.out_dir}" + (" (temporary)" if temporary else ""))
+    args.mailbox = args.mailbox or ["INBOX"]
+    if args.pdf_dir:
+        args.thread_pdf = True
+    if args.thread_pdf:
+        args.thread = True
+        if importlib.util.find_spec("reportlab") is None:
+            return fail("pdf_unavailable", "PDF export needs reportlab: pip install 'pec-inspector[pdf]'", 2)
     args.export_root = None
     if args.export or args.export_dir:
         args.export_root = Path(args.export_dir or os.path.join(args.out_dir, "export")).resolve()
         args.export_root.mkdir(parents=True, exist_ok=True)
 
     conn = None
+    address = None
     mailbox_info = None
     reports: List[dict] = []
     try:
         if args.eml:
-            ids = [b"file"]
             mailbox_info = {"source": "eml", "file": os.path.abspath(args.eml)}
         else:
             try:
@@ -407,7 +434,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             f"no IMAP server found for {cred.address}; pass --imap-host (and --imap-port / "
                             "--imap-security), or install dnspython (pip install dnspython) for DNS discovery", 2)
             eprint(f"IMAP server: {server.describe()}")
-            mailbox_info = {"source": "imap", "address": cred.address, "folder": args.mailbox,
+            mailbox_info = {"source": "imap", "address": cred.address, "folder": args.mailbox[0], "folders": args.mailbox,
                             "server": {"host": server.host, "port": server.port, "security": server.security,
                                        "found_by": server.source}}
             if args.discover_only:
@@ -419,18 +446,37 @@ def main(argv: Optional[List[str]] = None) -> int:
                 or server.username or cred.address
             try:
                 conn = connect(server, username, cred.password, args.timeout)
-                conn.select(quote_imap(args.mailbox), readonly=True)       # read-only: nothing is flagged as read
-                ids = select_messages(conn, args)
             except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
                 return fail("imap", f"IMAP connection failed: {exc}", 1)
-        info("messages found:", len(ids))
-        for item in ids:
-            if conn is None:
-                raw = Path(args.eml).read_bytes()
-            else:
-                _, data = conn.fetch(item, "(BODY.PEEK[])")                # PEEK: do not mark as read
-                raw = data[0][1]
-            reports.append(analyse_message(item.decode(), raw, args, text=not as_json))
+            address = cred.address
+            for folder in args.mailbox:
+                try:
+                    status, detail = conn.select(quote_imap(folder), readonly=True)   # read-only: nothing is flagged as read
+                    if status != "OK":
+                        raise imaplib.IMAP4.error(f"cannot open folder {folder!r}: {detail}")
+                    ids = select_messages(conn, args)
+                    info(f"messages found in {folder}:", len(ids))
+                    for item in ids:
+                        _, data = conn.fetch(item, "(BODY.PEEK[])")             # PEEK: do not mark as read
+                        label = item.decode() if len(args.mailbox) == 1 else f"{export.slug(folder)}-{item.decode()}"
+                        reports.append(analyse_message(label, data[0][1], args, text=not as_json, folder=folder))
+                except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
+                    return fail("imap", f"IMAP connection failed: {exc}", 1)
+        if args.eml:
+            info("messages found:", 1)
+            reports.append(analyse_message("file", Path(args.eml).read_bytes(), args, text=not as_json))
+        conversations = threads.build_threads(reports, address) if args.thread else None
+        pdf_root = None
+        if conversations is not None and args.thread_pdf:
+            pdf_root = Path(args.pdf_dir or os.path.join(args.out_dir, "threads")).resolve()
+            pdf_root.mkdir(parents=True, exist_ok=True)
+            by_id = {r["id"]: r for r in reports}
+            for conversation in conversations:
+                target = pdf_root / f"{conversation['id']}_{export.slug(conversation['subject'])}.pdf"
+                conversation["pdf"] = str(pdfexport.write_thread_pdf(conversation, by_id, target))
+        if conversations is not None and not as_json:
+            for line in threads.thread_lines(conversations):
+                print(line)
         if as_json:
             print(json.dumps({
                 "schema_version": SCHEMA_VERSION, "tool": "pec-inspector", "version": __version__,
@@ -440,9 +486,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "download_dir": args.out_dir,
                 "export_dir": str(args.export_root) if args.export_root else None,
                 "messages": reports, "summary": summarise(reports),
+                **({"threads": conversations} if conversations is not None else {}),
             }, ensure_ascii=False, indent=2, default=str))
         else:
             print(f"\nDownload folder: {args.out_dir}\nLink: {Path(args.out_dir).as_uri()}")
+            if pdf_root is not None:
+                print(f"PDF folder: {pdf_root}\nLink: {pdf_root.as_uri()}")
             if args.export_root is not None:
                 print(f"Export folder: {args.export_root}\nLink: {args.export_root.as_uri()}")
     finally:

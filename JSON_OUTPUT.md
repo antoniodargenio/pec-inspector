@@ -32,6 +32,7 @@ Back to the [README](README.md).
 | `download_dir` | string | Absolute path of the folder with every unpacked file. |
 | `export_dir` | string \| null | Absolute path of the `--export` folder, if requested. |
 | `messages` | array | One entry per processed message, oldest first, see [Message](#message). |
+| `threads` | array | Only with `--thread`: the conversations, see [Threads](#threads). |
 | `summary` | object | `{"messages": int, "messages_with_warnings": int, "invalid_signatures": int}`. `invalid_signatures` counts envelope and attachment signatures whose integrity check failed. |
 
 ### `mailbox`
@@ -79,6 +80,8 @@ With `--discover-only` the document contains just `schema_version`, `tool`, `ver
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | string | IMAP sequence number (or `"file"` with `--eml`). It identifies the message only within this run/folder state. |
+| `folder` | string \| null | IMAP folder the message was read from (`null` with `--eml`). With more than one `--mailbox`, `id` is `<folder>-<n>`. |
+| `threading` | object | `{"message_id", "original_message_id", "references"}`: the envelope's `Message-ID`, the id of the original message that identifies the conversation (enclosed original, else `X-Riferimento-Message-ID` / `daticert.xml` `msgid`, else the message's own id) and the ids the original replies to. Ids are without `<>`. |
 | `date`, `subject`, `from`, `to` | string | Headers of the outer (envelope) message; empty string if absent. |
 | `kind` | string | `"pec"` classic PEC (certified), `"rem"` REM (ETSI EN 319 532), `"anomaly"` anomaly envelope (the message was **not** certified), `"not_certified"` no PEC headers at all. Only `pec` and `rem` carry certification value. |
 | `headers` | object | `x_trasporto` (`posta-certificata`, `errore`, ...) and `x_ricevuta` (receipt type, e.g. `accettazione`, `avvenuta-consegna`); `null` when absent. |
@@ -116,6 +119,26 @@ Parsed from `daticert.xml` (DM 2/11/2005, sec. 7.4); keys are English, the value
 `message_id`, `app_layer_id`, `policy`, `event_time`, `subject`, `reasons` (`[{"code": str, "details": [str]}]`),
 `xmldsig_signed` (bool: carries a `ds:Signature`) and
 `xsd`: `{"status": "valid" | "invalid" | "skipped", "messages": [str]}` (`skipped` without `--xsd-dir`/`lxml`).
+
+## Threads
+
+With `--thread`, `threads` lists the conversations, oldest first. Messages are linked only by shared identifiers
+(see `threading`), never by subject.
+
+```json
+{ "id": "t1", "subject": "Example subject", "first_date": "Mon, 02 Nov 2026 10:00:00 +0100",
+  "last_date": "Tue, 03 Nov 2026 09:00:00 +0100",
+  "counts": { "sent": 1, "received": 1, "receipts": 2, "other": 0 },
+  "receipts": ["accettazione", "avvenuta-consegna"],
+  "pdf": "/tmp/pec-inspector-x/threads/t1_Example_subject.pdf",
+  "messages": [ { "id": "Sent-7", "folder": "Sent", "role": "sent", "receipt": null, "kind": "not_certified",
+                  "date": "...", "from": "...", "to": "...", "subject": "..." } ] }
+```
+
+`pdf` is present only with `--thread-pdf` (absolute path of the A4 PDF of the conversation). `messages` are in chronological order and refer to `messages[].id` of the top level. `role` is `sent` (the mailbox
+address is the sender), `received`, `receipt` (then `receipt` holds the type, e.g. `accettazione`,
+`avvenuta-consegna`, or the REM event) or `message` (role not determinable, e.g. with `--eml`). `from`, `to` and
+`subject` are those of the original message when the envelope encloses one.
 
 ## Signature objects
 

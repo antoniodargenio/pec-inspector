@@ -27,7 +27,7 @@ The package is not published on PyPI: install it from a clone of this repository
 environment.
 
 **Easiest: the install scripts.** They create (or reuse) a virtual environment in `.venv`, install the package
-with every Python dependency (`cryptography`, `dnspython`, `lxml`), and check that `openssl` is available
+with every Python dependency (`cryptography`, `dnspython`, `lxml`, `reportlab`), and check that `openssl` is available
 (they never install system software or use `sudo`; they only tell you what is missing):
 
 ```sh
@@ -37,7 +37,7 @@ scripts/install.sh                    # Linux, macOS, Git Bash, WSL
 .\scripts\install.ps1                 # Windows PowerShell 5.1+ / PowerShell 7+
 ```
 
-Options (same meaning in both): `--extras core|dns|xsd|all` / `-Extras ...` (default `all`),
+Options (same meaning in both): `--extras core|dns|xsd|pdf|all` / `-Extras ...` (default `all`),
 `--venv DIR` / `-VenvDir DIR`, `--no-venv` / `-NoVenv` (use the current environment), `--editable` / `-Editable`
 (development install), `--python BIN` / `-Python BIN`. They can be run again safely.
 
@@ -51,7 +51,8 @@ python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activ
 pip install .            # core only (cryptography)
 pip install ".[dns]"     # core + dnspython: SRV/MX based IMAP discovery
 pip install ".[xsd]"     # core + lxml: XSD validation of REM evidence
-pip install ".[all]"     # core + dnspython + lxml
+pip install ".[pdf]"     # core + reportlab: conversations as PDF (--thread-pdf)
+pip install ".[all]"     # core + dnspython + lxml + reportlab
 ```
 
 This installs the `pec-inspector` command. You can also run it without installing:
@@ -100,6 +101,35 @@ pec-inspector out/ --search "Prot. 0123456" --export
 Receipts (acceptance, delivery) have no enclosed original: `message.txt` then holds the receipt text.
 Attachment names are sanitised and duplicates renamed. `message.html` starts with a Content-Security-Policy tag that
 blocks remote images and scripts, but attachments are saved untouched: open them with the usual care.
+
+## Conversations (`--thread`)
+
+`--thread` groups what was **sent**, what was **received** and the **receipts** (acceptance, delivery, ...) into
+conversations, printed after the per-message report (and as `threads` in `--json`). Read the Sent folder as well by
+repeating `--mailbox` (the folder name depends on the provider):
+
+```sh
+pec-inspector out/ --mailbox INBOX --mailbox Sent --search "Prot. 0123456" --thread
+```
+
+Messages are linked only through identifiers, never by subject: the `Message-ID` of the original message (the copy in
+Sent, the `postacert.eml` inside an envelope), the `X-Riferimento-Message-ID` header and `<msgid>` of the receipts, and
+the `In-Reply-To` / `References` of the original, so replies join the conversation they answer. Each message is labelled
+`sent` (the mailbox is the sender), `received`, `receipt` (with its type) or `message` (role unknown, e.g. `--eml`).
+With several folders the selection (`--last`, `--limit`, `--search`, `--from`) applies to each folder and message ids
+become `<folder>-<n>`.
+
+### One PDF per conversation (`--thread-pdf`)
+
+`--thread-pdf` (implies `--thread`; needs `reportlab`, extra `pdf`) saves every conversation as a single **A4** PDF with
+its messages in chronological order: for each one the role (sent / received / receipt and its type), date, from, to,
+subject, the decoded text and the list of attachments (listed, not embedded). Files go to `<out_dir>/threads/`
+(`--pdf-dir DIR` chooses the folder and implies `--thread-pdf`); the folder link is printed at the end and, with
+`--json`, each thread gets a `pdf` field. Standard PDF fonts are used: characters outside Latin-1 are not rendered.
+
+```sh
+pec-inspector out/ --mailbox INBOX --mailbox Sent --search "Prot. 0123456" --thread-pdf
+```
 
 ## JSON output for scripts and AI agents
 

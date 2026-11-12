@@ -30,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('core', 'dns', 'xsd', 'all')][string]$Extras = 'all',
+    [ValidateSet('core', 'dns', 'xsd', 'pdf', 'all')][string]$Extras = 'all',
     [string]$VenvDir,
     [switch]$NoVenv,
     [switch]$Editable,
@@ -95,7 +95,8 @@ if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 $check = @'
 import importlib.util
 for module, role in (("cryptography", "required"), ("dns", "optional: SRV/MX IMAP discovery"),
-                     ("lxml", "optional: XSD validation of REM evidence")):
+                     ("lxml", "optional: XSD validation of REM evidence"),
+                     ("reportlab", "optional: --thread-pdf")):
     state = "ok" if importlib.util.find_spec(module) else "not installed"
     print(f"  {module:<13} {state:<14} ({role})")
 '@

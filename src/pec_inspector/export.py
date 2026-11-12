@@ -88,13 +88,10 @@ def _headers(message) -> str:
     return "\n".join(lines)
 
 
-def export_message(num: str, msg, root, raw: Optional[bytes] = None) -> Tuple[Path, int]:
-    """Write the readable export of ``msg`` (an ``email.message.EmailMessage``) under ``root``.
-    Returns ``(message folder, number of attachments written)``."""
-    folder = Path(root) / f"{num}_{slug(str(msg['Subject'] or ''))}"
-    attachments_dir, pec_dir = folder / "attachments", folder / "pec"
-    folder.mkdir(parents=True, exist_ok=True)
-
+def read_parts(msg) -> dict:
+    """Split a PEC/REM message into what a reader wants: ``main`` (the original message, or ``msg`` itself),
+    ``body_text``, ``body_html``, ``attachments`` and ``pec_files`` as ``(name, bytes)`` lists, ``wrapper`` (the text of
+    the PEC envelope, empty if there is no enclosed original)."""
     original = []                         # at most one enclosed original message
     texts = {0: [], 1: []}                # level 0 = PEC wrapper, 1 = original message
     htmls = {0: [], 1: []}
@@ -128,6 +125,20 @@ def export_message(num: str, msg, root, raw: Optional[bytes] = None) -> Tuple[Pa
     main, body_level = (original[0], 1) if original else (msg, 0)
     body_html = "\n".join(htmls[body_level])
     body_text = "\n".join(texts[body_level]).strip() or (html_to_text(body_html) if body_html else "")
+    return {"main": main, "body_text": body_text, "body_html": body_html, "attachments": attachments,
+            "pec_files": pec_files, "wrapper": "\n".join(texts[0]).strip() if original else ""}
+
+
+def export_message(num: str, msg, root, raw: Optional[bytes] = None) -> Tuple[Path, int]:
+    """Write the readable export of ``msg`` (an ``email.message.EmailMessage``) under ``root``.
+    Returns ``(message folder, number of attachments written)``."""
+    folder = Path(root) / f"{num}_{slug(str(msg['Subject'] or ''))}"
+    attachments_dir, pec_dir = folder / "attachments", folder / "pec"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    parts = read_parts(msg)
+    main, body_text, body_html = parts["main"], parts["body_text"], parts["body_html"]
+    attachments, pec_files = parts["attachments"], parts["pec_files"]
     (folder / "message.txt").write_text(_headers(main) + "\n\n" + body_text.strip() + "\n", encoding="utf-8")
     if body_html:
         (folder / "message.html").write_text(CSP_META + body_html, encoding="utf-8")
@@ -146,7 +157,7 @@ def export_message(num: str, msg, root, raw: Optional[bytes] = None) -> Tuple[Pa
             else:
                 target.unlink(missing_ok=True)
 
-    wrapper = "\n".join(texts[0]).strip() if original else ""
+    wrapper = parts["wrapper"]
     if pec_files or wrapper or raw is not None:
         pec_dir.mkdir(exist_ok=True)
         for name, data in pec_files:
