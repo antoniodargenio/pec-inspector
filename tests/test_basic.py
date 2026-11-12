@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pki   # noqa: E402
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
+CRLF = bytes([13, 10])
 
 AUTOCONFIG = b"""<?xml version="1.0"?>
 <clientConfig><emailProvider id="example.test">
@@ -172,12 +173,12 @@ class SignatureTest(unittest.TestCase):
         cls.tmp.cleanup()
 
     def run_checks(self, attachments):
-        lines, out = [], tempfile.TemporaryDirectory()
-        pki.check_attachment_signatures(attachments, "1_orig_", "Wed, 11 Nov 2026 16:09:24 +0100", None, out.name,
-                                        False, lines.append)
+        out = tempfile.TemporaryDirectory()
+        self.results = pki.check_attachment_signatures(attachments, "1_orig_", "Wed, 11 Nov 2026 16:09:24 +0100",
+                                                       None, out.name, False)
         extracted = sorted(os.listdir(out.name))
         out.cleanup()
-        return "\n".join(lines), extracted
+        return "\n".join(pki.attachment_lines(self.results)), extracted
 
     def test_enveloping_p7m_and_extraction(self):
         text, extracted = self.run_checks({"doc.txt.p7m": self.p7m})
@@ -316,6 +317,74 @@ class OutputDirectoryTest(unittest.TestCase):
         finally:
             del os.environ["PEC_OUT_DIR"]
         self.assertTrue(os.path.exists(os.path.join(target, "msg_file.eml")))
+
+
+class JsonOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.eml = os.path.join(self.tmp.name, "m.eml")
+        Path(self.eml).write_bytes(CRLF.join([b"From: a@example.test", b"Subject: ANOMALIA MESSAGGIO: t",
+                                              b"X-Trasporto: errore", b"", b"body", b""]))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_json(self, *argv):
+        import contextlib
+        import io
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_stdout_is_a_single_json_document(self):
+        import json
+        code, out, err = self.run_json(os.path.join(self.tmp.name, "o"), "--eml", self.eml, "--no-revocation",
+                                       "--export", "--json")
+        self.assertEqual(code, 0)
+        doc = json.loads(out)                               # stdout holds nothing but the document
+        self.assertEqual((doc["schema_version"], doc["tool"]), (1, "pec-inspector"))
+        self.assertEqual(doc["mailbox"]["source"], "eml")
+        self.assertEqual(doc["options"], {"ca_file": False, "revocation_checked": False})
+        message, = doc["messages"]
+        self.assertEqual(message["kind"], "anomaly")
+        self.assertIsNone(message["envelope_signature"])
+        self.assertTrue(any("ANOMALY ENVELOPE" in w for w in message["warnings"]))
+        self.assertTrue(any("smime.p7s missing" in w for w in message["warnings"]))
+        self.assertEqual(doc["summary"], {"messages": 1, "messages_with_warnings": 1, "invalid_signatures": 0})
+        self.assertTrue(os.path.isdir(message["export"]["folder"]))
+        self.assertIn("download folder", err)               # diagnostics stay on stderr
+
+    def test_error_is_reported_as_json(self):
+        import json
+        old = {k: os.environ.pop(k, None) for k in ("PEC_ADDRESS", "PEC_PASSWORD", "PEC_CREDENTIALS_FILE")}
+        try:
+            code, out, err = self.run_json(os.path.join(self.tmp.name, "o"), "--json")
+        finally:
+            os.environ.update({k: v for k, v in old.items() if v is not None})
+        self.assertEqual(code, 2)
+        doc = json.loads(out)
+        self.assertEqual(doc["error"]["code"], "credentials")
+        self.assertIn("error:", err)
+
+    def test_attachment_signatures_are_json_serialisable(self):
+        import json
+        if not HAVE_OPENSSL:
+            self.skipTest("openssl not available")
+        data = SignatureTest
+        data.setUpClass()
+        try:
+            results = pki.check_attachment_signatures({"a.pdf": data.pdf, "doc.txt.p7m": data.p7m}, "1_", "Wed, 11 Nov 2026 16:09:24 +0100",
+                                                      None, self.tmp.name, True)
+        finally:
+            data.tearDownClass()
+        text = json.dumps(results)
+        types = {r["type"] for r in json.loads(text)}
+        self.assertEqual(types, {"pades", "cades_enveloping"})
+        pades = next(r for r in results if r["type"] == "pades")
+        self.assertTrue(pades["integrity_ok"] and pades["covers_whole_file"])
+        self.assertEqual(pades["chain"]["status"], "not_checked")
+        self.assertIsInstance(pades["revocation"], list)       # revocation requested: a list (self-signed: no OCSP/CRL)
 
 
 if __name__ == "__main__":

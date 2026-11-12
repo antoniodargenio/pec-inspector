@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import email
 import imaplib
+import json
 import os
 import ssl
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from email import policy
 from pathlib import Path
 from typing import List, Optional
@@ -16,6 +18,8 @@ from typing import List, Optional
 from . import __version__, export, formats, netsafe, pki
 from .credentials import CredentialsError, resolve_credentials
 from .discovery import ImapServer, discover
+
+SCHEMA_VERSION = 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,11 +69,15 @@ def build_parser() -> argparse.ArgumentParser:
     chk.add_argument("--allow-private-urls", action="store_true",
                      help="allow OCSP/CRL/AIA URLs on private or loopback addresses (intranet PKI, tests)")
 
-    exp = p.add_argument_group("export")
+    exp = p.add_argument_group("export and output format")
     exp.add_argument("--export", action="store_true",
                      help="also save each message in the clear (decoded text/HTML body) with all its attachments, "
                           "and print the link of the folder (default folder: <out_dir>/export)")
     exp.add_argument("--export-dir", metavar="DIR", help="export folder (implies --export)")
+    exp.add_argument("--json", action="store_true",
+                     help="print ONE machine-readable JSON document on stdout instead of the text report "
+                          "(progress and diagnostics go to stderr; errors are reported as JSON too); "
+                          "schema documented in JSON_OUTPUT.md")
     p.add_argument("-v", "--verbose", action="store_true", help="show discovery details on stderr")
     return p
 
@@ -124,9 +132,32 @@ def select_messages(conn, args) -> List[bytes]:
     return ids[-args.limit:]
 
 
+class Reporter:
+    """Prints the text report (unless disabled) and collects the warnings for the JSON report."""
+
+    def __init__(self, text: bool):
+        self.text = text
+        self.warnings: List[str] = []
+
+    def say(self, *args):
+        if self.text:
+            print(*args)
+
+    def lines(self, lines):
+        for line in lines:
+            self.say(line)
+
+    def warn(self, message: str, indent: str = ""):
+        self.warnings.append(message)
+        self.say(f"{indent}!! {message}")
+
+
 # ---------------------------------------------------------------------------------------------
-def analyse_message(num: str, raw: bytes, args) -> None:
+def analyse_message(num: str, raw: bytes, args, text: bool = True) -> dict:
+    """Unpack and check one message. Prints the text report when ``text`` and always returns the
+    structured report (the JSON ``messages[]`` entry)."""
     out_dir = args.out_dir
+    R = Reporter(text)
     msg = email.message_from_bytes(raw, policy=policy.default)
     envelope = os.path.join(out_dir, f"msg_{num}.eml")
     Path(envelope).write_bytes(raw)
@@ -135,42 +166,56 @@ def analyse_message(num: str, raw: bytes, args) -> None:
     rem = {k: str(v) for k, v in msg.items() if k.upper().startswith("REM-")}
     evidences: list = []
     inner_names: list = []
-    print(f"\n=== msg {num} | {msg['Date']} | {msg['Subject']}")
+    report: dict = {
+        "id": num, "date": str(msg["Date"] or ""), "subject": str(msg["Subject"] or ""),
+        "from": str(msg["From"] or ""), "to": str(msg["To"] or ""),
+        "kind": None,
+        "headers": {"x_trasporto": x_transport or None, "x_ricevuta": x_receipt or None},
+        "rem": rem or None, "rem_checks": {}, "original_message": None, "daticert": None, "evidence": [],
+        "attachments": [], "attachment_signatures": [], "envelope_signature": None,
+        "files": {"envelope_eml": envelope}, "export": None, "warnings": R.warnings,
+    }
+
+    R.say(f"\n=== msg {num} | {msg['Date']} | {msg['Subject']}")
     if rem:
-        print("TYPE: REM (ETSI EN 319 532 / REM-Policy-IT)")
+        report["kind"] = "rem"
+        R.say("TYPE: REM (ETSI EN 319 532 / REM-Policy-IT)")
         for key, value in rem.items():
-            print(f"  {key}: {value}")
+            R.say(f"  {key}: {value}")
         mtype, event = rem.get("REM-MessageType", ""), rem.get("REM-EventIdentifier", "")
         if mtype and mtype.startswith(formats.MESSAGE_TYPE_URI) and \
                 mtype[len(formats.MESSAGE_TYPE_URI):] not in formats.REM_MESSAGE_TYPES:
-            print(f"!! unexpected REM-MessageType: {mtype}")
+            R.warn(f"unexpected REM-MessageType: {mtype}")
         if event.startswith(formats.EVENT_URI):
             if event[len(formats.EVENT_URI):] not in formats.REM_EVENTS:
-                print(f"  (event not among those named in the specifications consulted: {event[len(formats.EVENT_URI):]})")
+                R.say(f"  (event not among those named in the specifications consulted: {event[len(formats.EVENT_URI):]})")
         elif event:
-            print(f"!! REM-EventIdentifier with an unexpected URI: {event}")
+            R.warn(f"REM-EventIdentifier with an unexpected URI: {event}")
         for header in ("REM-MetadataVersion", "REM-MessageType", "REM-DigestAlgorithm", "REM-DigestValue",
                        "REM-UAMessageIdentifier"):
             if header not in rem and (mtype.endswith("dispatch") or "receipt" in mtype):
-                print(f"!! mandatory REM header missing: {header}")
+                R.warn(f"mandatory REM header missing: {header}")
         if "Bcc" in msg:
-            print("!! Bcc header present: not allowed by REM-Policy-IT (I-FBCC)")
+            R.warn("Bcc header present: not allowed by REM-Policy-IT (I-FBCC)")
         if x_transport or x_receipt:
-            print(f"  (also present: X-Trasporto={x_transport or '-'} / X-Ricevuta={x_receipt or '-'}: "
+            R.say(f"  (also present: X-Trasporto={x_transport or '-'} / X-Ricevuta={x_receipt or '-'}: "
                   "encapsulated classic PEC envelope?)")
     else:
-        print(f"X-Trasporto: {x_transport or '-'} | X-Ricevuta: {x_receipt or '-'}")
-    # DM 2/11/2005 sec. 6.4.2: anomaly envelope = "X-Trasporto: errore" + Subject "ANOMALIA MESSAGGIO: ..."
-    if not rem:
+        R.say(f"X-Trasporto: {x_transport or '-'} | X-Ricevuta: {x_receipt or '-'}")
+        # DM 2/11/2005 sec. 6.4.2: anomaly envelope = "X-Trasporto: errore" + Subject "ANOMALIA MESSAGGIO: ..."
         if x_transport == "errore" or (msg.get("Subject", "") or "").upper().startswith("ANOMALIA MESSAGGIO"):
-            print("!! ANOMALY ENVELOPE (sec. 6.4.2): the message was NOT certified (ordinary mail or provider error).")
-            print("   It only wraps the message as received, without daticert.xml: no certification value.")
+            report["kind"] = "anomaly"
+            R.warn("ANOMALY ENVELOPE (sec. 6.4.2): the message was NOT certified (ordinary mail or provider error).")
+            R.say("   It only wraps the message as received, without daticert.xml: no certification value.")
         elif not x_transport and not x_receipt:
-            print("!! no PEC headers: the message did not go through the certified circuit")
-        elif x_transport and x_transport != "posta-certificata":
-            print(f"!! unexpected X-Trasporto: {x_transport}")
+            report["kind"] = "not_certified"
+            R.warn("no PEC headers: the message did not go through the certified circuit")
+        else:
+            report["kind"] = "pec"
+            if x_transport and x_transport != "posta-certificata":
+                R.warn(f"unexpected X-Trasporto: {x_transport}")
     if x_receipt and x_receipt not in formats.RECEIPT_TYPES:
-        print(f"!! X-Ricevuta not allowed by the rules: {x_receipt}")
+        R.warn(f"X-Ricevuta not allowed by the rules: {x_receipt}")
 
     smime_signatures: List[bytes] = []
     original_attachments: dict = {}
@@ -179,7 +224,7 @@ def analyse_message(num: str, raw: bytes, args) -> None:
         content_type, filename = part.get_content_type(), part.get_filename()
         section = part.get("REM-Section-Type")
         if section and section not in formats.REM_SECTIONS:
-            print(f"!! unexpected REM-Section-Type: {section}")
+            R.warn(f"unexpected REM-Section-Type: {section}")
         if content_type == "message/rfc822":
             inner = part.get_payload(0)
             name = pki.safe_filename(filename or "inner.eml")        # PEC: postacert.eml | REM: AttachedMimeMessage
@@ -187,7 +232,11 @@ def analyse_message(num: str, raw: bytes, args) -> None:
                 name += ".eml"
             inner_names.append(filename)
             Path(out_dir, prefix + name).write_bytes(inner.as_bytes())
-            print(f"original message: {filename} | From: {inner['From']} | Subject: {inner['Subject']}")
+            if report["original_message"] is None:
+                report["original_message"] = {"filename": filename, "from": str(inner["From"] or ""),
+                                              "to": str(inner["To"] or ""), "subject": str(inner["Subject"] or ""),
+                                              "date": str(inner["Date"] or ""), "saved_as": os.path.join(out_dir, prefix + name)}
+            R.say(f"original message: {filename} | From: {inner['From']} | Subject: {inner['Subject']}")
             explore(inner, prefix + "orig_", level + 1)
         elif part.is_multipart():
             for sub in part.iter_parts():
@@ -196,8 +245,11 @@ def analyse_message(num: str, raw: bytes, args) -> None:
             payload = part.get_payload(decode=True)
             if payload is None:
                 return
-            Path(out_dir, prefix + pki.safe_filename(filename)).write_bytes(payload)
-            print(f"attachment: {filename} ({len(payload)} bytes)")
+            saved = Path(out_dir, prefix + pki.safe_filename(filename))
+            saved.write_bytes(payload)
+            report["attachments"].append({"name": filename, "size": len(payload), "saved_as": str(saved),
+                                          "role": "original" if level else "pec"})
+            R.say(f"attachment: {filename} ({len(payload)} bytes)")
             lower = filename.lower()
             if lower == "smime.p7s" and not level:
                 smime_signatures.append(payload)
@@ -206,85 +258,120 @@ def analyse_message(num: str, raw: bytes, args) -> None:
             if lower == "daticert.xml":
                 try:
                     data = formats.read_daticert(payload)
-                    print("daticert.xml:")
+                    R.say("daticert.xml:")
                     for key, value in data.items():
                         if key != "_issues":
-                            print(f"  {key}: {value}")
+                            R.say(f"  {key}: {value}")
                     for issue in data["_issues"]:
-                        print("  !!", issue)
+                        R.warn(issue, indent="  ")
                     if x_receipt and data["type"] != x_receipt and x_transport != "posta-certificata":
-                        print(f"  !! X-Ricevuta ({x_receipt}) differs from daticert type ({data['type']})")
+                        R.warn(f"X-Ricevuta ({x_receipt}) differs from daticert type ({data['type']})", indent="  ")
+                    report["daticert"] = {**{k: v for k, v in data.items() if k != "_issues"}, "issues": data["_issues"]}
                 except ET.ParseError as exc:
-                    print("!! invalid daticert.xml:", exc)
+                    R.warn(f"invalid daticert.xml: {exc}")
             elif content_type == "application/xml" and not level:
                 # REM: ERDS evidence attached as "<Event>.xml" (EN 319 532-3 sec. 6.2.6.2)
                 try:
                     evidence = formats.read_evidence(payload)
                 except ET.ParseError as exc:
-                    print(f"!! {filename}: invalid XML: {exc}")
+                    R.warn(f"{filename}: invalid XML: {exc}")
                 else:
                     evidences.append(evidence)
-                    print(f"ERDS evidence ({filename}):")
+                    R.say(f"ERDS evidence ({filename}):")
                     for key, value in evidence.items():
                         if value not in ("", [], False):
-                            print(f"  {key}: {value}")
+                            R.say(f"  {key}: {value}")
                     if not evidence["xmldsig_signed"]:
-                        print("  !! evidence without XML signature (ds:Signature): EN 319 522-3 5.2.2.28 requires it")
+                        R.warn("evidence without XML signature (ds:Signature): EN 319 522-3 5.2.2.28 requires it",
+                               indent="  ")
                     ok, errors = formats.validate_evidence(payload, args.xsd_dir)
                     if ok is None:
-                        print("  XSD validation:", errors[0])
+                        R.say("  XSD validation:", errors[0])
+                        xsd = {"status": "skipped", "messages": errors}
                     elif ok:
-                        print("  XSD validation (EN 319 522-3): VALID")
+                        R.say("  XSD validation (EN 319 522-3): VALID")
+                        xsd = {"status": "valid", "messages": []}
                     else:
-                        print("  XSD validation (EN 319 522-3): INVALID")
+                        R.say("  XSD validation (EN 319 522-3): INVALID")
                         for error in errors:
-                            print("    -", error[:200])
+                            R.say("    -", error[:200])
+                        xsd = {"status": "invalid", "messages": errors}
+                    report["evidence"].append({"file": filename, **evidence, "xsd": xsd})
         elif content_type == "text/plain" and level:
-            print("original text:\n", part.get_content()[:3000])
+            R.say("original text:\n", part.get_content()[:3000])
 
     explore(msg, f"{num}_")
     revocation = not args.no_revocation
     if original_attachments:
-        pki.check_attachment_signatures(original_attachments, f"{num}_orig_", msg["Date"], args.ca, out_dir,
-                                        revocation, print)
+        results = pki.check_attachment_signatures(original_attachments, f"{num}_orig_", msg["Date"], args.ca, out_dir,
+                                                  revocation)
+        report["attachment_signatures"] = results
+        R.lines(pki.attachment_lines(results))
 
     if rem:
         # consistency of REM headers vs evidence (REM-Policy-IT PP2, PP3o, I-HFC; EN 319 532-4 table 7)
         for ev in evidences:
             if rem.get("REM-EventIdentifier") and ev["event"] and rem["REM-EventIdentifier"] != ev["event"]:
-                print(f"!! REM-EventIdentifier ({rem['REM-EventIdentifier']}) != ERDSEventId ({ev['event']})")
+                R.warn(f"REM-EventIdentifier ({rem['REM-EventIdentifier']}) != ERDSEventId ({ev['event']})")
             if ev["evidence_id"] and "REM-Evidence-ID" in rem and \
                     formats.normalize_id(rem["REM-Evidence-ID"]) != formats.normalize_id(ev["evidence_id"]):
-                print("!! REM-Evidence-ID != EvidenceIdentifier of the evidence")
+                R.warn("REM-Evidence-ID != EvidenceIdentifier of the evidence")
             if ev["app_layer_id"] and "REM-UAMessageIdentifier" in rem and \
                     formats.normalize_id(rem["REM-UAMessageIdentifier"]) != formats.normalize_id(ev["app_layer_id"]):
-                print("!! REM-UAMessageIdentifier != AppLayerIdentifier of the evidence")
+                R.warn("REM-UAMessageIdentifier != AppLayerIdentifier of the evidence")
         if not evidences and "receipt" in rem.get("REM-MessageType", ""):
-            print("!! REM receipt without an attached XML evidence")
+            R.warn("REM receipt without an attached XML evidence")
         algorithm = formats.REM_DIGESTS.get(rem.get("REM-DigestAlgorithm", ""))
         if rem.get("REM-DigestValue") and algorithm and any(inner_names):
             matches = rem["REM-DigestValue"].strip() in formats.original_digests(raw, algorithm)
-            print(f"digest of the original message ({algorithm}): "
+            report["rem_checks"]["original_digest"] = {"algorithm": algorithm, "matches": matches}
+            R.say(f"digest of the original message ({algorithm}): "
                   f"{'MATCHES REM-DigestValue' if matches else 'NOT verified (the provider normalisation may differ)'}")
         elif rem.get("REM-DigestAlgorithm") and not algorithm:
-            print(f"  unsupported digest algorithm: {rem['REM-DigestAlgorithm']}")
+            R.say(f"  unsupported digest algorithm: {rem['REM-DigestAlgorithm']}")
         if "AttachedMimeMessage" not in [n for n in inner_names if n] and "dispatch" in rem.get("REM-MessageType", ""):
-            print("!! dispatch without the message/rfc822 part 'AttachedMimeMessage'")
+            R.warn("dispatch without the message/rfc822 part 'AttachedMimeMessage'")
 
     if smime_signatures:
-        ok, result, chain, lines = pki.verify_envelope_signature(envelope, smime_signatures[0], msg["Date"],
-                                                                 args.ca, args.index, revocation)
-        print(f"S/MIME signature (integrity): {'VALID' if ok else 'INVALID'} - {result}")
-        for line in lines:
-            print("  " + line)
-        print("  trust chain: " + ("NOT verified (no --ca)" if chain is None
-                                    else f"{'VERIFIED' if chain else 'NOT verified'} against --ca"))
+        sig = pki.verify_envelope_signature(envelope, smime_signatures[0], msg["Date"], args.ca, args.index, revocation)
+        report["envelope_signature"] = sig
+        R.lines(pki.envelope_lines(sig))
     else:
-        print("!! smime.p7s missing: unsigned envelope")
+        R.warn("smime.p7s missing: unsigned envelope")
+
+    if args.export_root is not None:
+        folder, count = export.export_message(num, msg, args.export_root, raw)
+        report["export"] = {"folder": str(folder), "attachments": count}
+        R.say(f"exported: {folder} ({count} attachment{'s' if count != 1 else ''})")
+    return report
+
+
+def summarise(reports: List[dict]) -> dict:
+    problems = 0
+    for r in reports:
+        if r["envelope_signature"] and not r["envelope_signature"]["integrity_ok"]:
+            problems += 1
+        problems += sum(1 for s in r["attachment_signatures"] if s.get("integrity_ok") is False)
+    return {"messages": len(reports), "messages_with_warnings": sum(1 for r in reports if r["warnings"]),
+            "invalid_signatures": problems}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    as_json = args.json
+    if as_json and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")        # JSON is always UTF-8, whatever the console code page
+
+    def info(*parts):                                    # human messages: stdout in text mode, stderr with --json
+        (eprint if as_json else print)(*parts)
+
+    def fail(code: str, message: str, status: int) -> int:
+        eprint(f"error: {message}")
+        if as_json:
+            print(json.dumps({"schema_version": SCHEMA_VERSION, "tool": "pec-inspector", "version": __version__,
+                              "error": {"code": code, "message": message}}, ensure_ascii=False, indent=2))
+        return status
+
     netsafe.set_allow_private(args.allow_private_urls)
     temporary = False
     if not args.out_dir:
@@ -297,24 +384,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         temporary = True
     args.out_dir = str(Path(args.out_dir).resolve())   # canonical path (e.g. no 8.3 short names on Windows)
     eprint(f"download folder: {args.out_dir}" + (" (temporary)" if temporary else ""))
+    args.export_root = None
+    if args.export or args.export_dir:
+        args.export_root = Path(args.export_dir or os.path.join(args.out_dir, "export")).resolve()
+        args.export_root.mkdir(parents=True, exist_ok=True)
 
     conn = None
+    mailbox_info = None
+    reports: List[dict] = []
     try:
         if args.eml:
             ids = [b"file"]
+            mailbox_info = {"source": "eml", "file": os.path.abspath(args.eml)}
         else:
             try:
                 cred = resolve_credentials(args.address, args.username, args.credentials_file)
             except CredentialsError as exc:
-                eprint(f"error: {exc}")
-                return 2
+                return fail("credentials", str(exc), 2)
             server = pick_server(args, cred)
             if server is None:
-                eprint(f"error: no IMAP server found for {cred.address}; pass --imap-host (and --imap-port / "
-                       "--imap-security), or install dnspython (pip install dnspython) for DNS discovery")
-                return 2
+                return fail("no_imap_server",
+                            f"no IMAP server found for {cred.address}; pass --imap-host (and --imap-port / "
+                            "--imap-security), or install dnspython (pip install dnspython) for DNS discovery", 2)
             eprint(f"IMAP server: {server.describe()}")
+            mailbox_info = {"source": "imap", "address": cred.address, "folder": args.mailbox,
+                            "server": {"host": server.host, "port": server.port, "security": server.security,
+                                       "found_by": server.source}}
             if args.discover_only:
+                if as_json:
+                    print(json.dumps({"schema_version": SCHEMA_VERSION, "tool": "pec-inspector", "version": __version__,
+                                      "mailbox": mailbox_info}, ensure_ascii=False, indent=2))
                 return 0
             username = args.username or (cred.username if cred.username != cred.address else None) \
                 or server.username or cred.address
@@ -323,27 +422,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                 conn.select(quote_imap(args.mailbox), readonly=True)       # read-only: nothing is flagged as read
                 ids = select_messages(conn, args)
             except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-                eprint(f"error: IMAP connection failed: {exc}")
-                return 1
-        print("messages found:", len(ids))
-        export_root = None
-        if args.export or args.export_dir:
-            export_root = Path(args.export_dir or os.path.join(args.out_dir, "export")).resolve()
-            export_root.mkdir(parents=True, exist_ok=True)
+                return fail("imap", f"IMAP connection failed: {exc}", 1)
+        info("messages found:", len(ids))
         for item in ids:
             if conn is None:
                 raw = Path(args.eml).read_bytes()
             else:
                 _, data = conn.fetch(item, "(BODY.PEEK[])")                # PEEK: do not mark as read
                 raw = data[0][1]
-            analyse_message(item.decode(), raw, args)
-            if export_root is not None:
-                folder, count = export.export_message(item.decode(), email.message_from_bytes(raw, policy=policy.default),
-                                                      export_root, raw)
-                print(f"exported: {folder} ({count} attachment{'s' if count != 1 else ''})")
-        print(f"\nDownload folder: {args.out_dir}\nLink: {Path(args.out_dir).as_uri()}")
-        if export_root is not None:
-            print(f"Export folder: {export_root}\nLink: {export_root.as_uri()}")
+            reports.append(analyse_message(item.decode(), raw, args, text=not as_json))
+        if as_json:
+            print(json.dumps({
+                "schema_version": SCHEMA_VERSION, "tool": "pec-inspector", "version": __version__,
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "mailbox": mailbox_info,
+                "options": {"ca_file": bool(args.ca), "revocation_checked": not args.no_revocation},
+                "download_dir": args.out_dir,
+                "export_dir": str(args.export_root) if args.export_root else None,
+                "messages": reports, "summary": summarise(reports),
+            }, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"\nDownload folder: {args.out_dir}\nLink: {Path(args.out_dir).as_uri()}")
+            if args.export_root is not None:
+                print(f"Export folder: {args.export_root}\nLink: {args.export_root.as_uri()}")
     finally:
         if conn is not None:
             try:

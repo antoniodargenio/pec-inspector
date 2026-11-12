@@ -82,6 +82,21 @@ Receipts (acceptance, delivery) have no enclosed original: `message.txt` then ho
 Attachment names are sanitised and duplicates renamed. `message.html` starts with a Content-Security-Policy tag that
 blocks remote images and scripts, but attachments are saved untouched: open them with the usual care.
 
+## JSON output for scripts and AI agents
+
+`--json` replaces the text report with a single machine-readable JSON document on stdout (UTF-8; progress and
+errors go to stderr, errors are also reported as a JSON document with a non-zero exit status):
+
+```sh
+pec-inspector --last 5 --ca agid.pem --json | jq '.messages[] | {id, kind, ok: .envelope_signature.integrity_ok}'
+```
+
+It carries, per message: classification (`pec` / `rem` / `anomaly` / `not_certified`), the parsed `daticert.xml`
+or REM evidence, the attachments, and structured results for every signature (integrity, signer, validity,
+trust chain, OCSP/CRL per certificate), plus the warnings. The complete field reference, enumerations and a
+Python example are in [JSON_OUTPUT.md](JSON_OUTPUT.md). The document contains mail metadata and local paths:
+treat it as sensitive.
+
 ## Credentials
 
 Precedence: command line > environment variables > credentials file > interactive prompt (password only).
