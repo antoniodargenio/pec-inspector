@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pki, threads   # noqa: E402
+from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pdfexport, pki, threads   # noqa: E402
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 CRLF = bytes([13, 10])
@@ -455,7 +455,7 @@ class JsonOutputTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in thread["messages"]], ["file"])
         self.assertIn("threading", doc["messages"][0])
 
-    @unittest.skipUnless(__import__("importlib.util").util.find_spec("reportlab"), "reportlab not installed")
+    @unittest.skipUnless(pdfexport.available(), "reportlab not usable")
     def test_thread_pdf_is_a4(self):
         import json
         code, out, _ = self.run_json(os.path.join(self.tmp.name, "o"), "--eml", self.eml, "--no-revocation",

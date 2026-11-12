@@ -26,6 +26,15 @@ class PdfUnavailable(RuntimeError):
     pass
 
 
+def available() -> bool:
+    """True if reportlab can really be imported (it is installed but refuses to load on Python < 3.10)."""
+    try:
+        import reportlab.platypus  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _paragraph_text(text: str) -> str:
     return escape(text).replace("\r", "").replace("\n", "<br/>")
 

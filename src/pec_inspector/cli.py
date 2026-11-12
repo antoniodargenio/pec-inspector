@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import email
 import imaplib
-import importlib.util
 import json
 import os
 import ssl
@@ -413,8 +412,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.thread_pdf = True
     if args.thread_pdf:
         args.thread = True
-        if importlib.util.find_spec("reportlab") is None:
-            return fail("pdf_unavailable", "PDF export needs reportlab: pip install 'pec-inspector[pdf]'", 2)
+        if not pdfexport.available():
+            return fail("pdf_unavailable", "PDF export needs reportlab (Python 3.10+): pip install 'pec-inspector[pdf]'", 2)
     args.export_root = None
     if args.export or args.export_dir:
         args.export_root = Path(args.export_dir or os.path.join(args.out_dir, "export")).resolve()

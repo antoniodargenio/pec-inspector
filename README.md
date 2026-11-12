@@ -121,7 +121,7 @@ become `<folder>-<n>`.
 
 ### One PDF per conversation (`--thread-pdf`)
 
-`--thread-pdf` (implies `--thread`; needs `reportlab`, extra `pdf`) saves every conversation as a single **A4** PDF with
+`--thread-pdf` (implies `--thread`; needs `reportlab`, which needs Python 3.10+, extra `pdf`) saves every conversation as a single **A4** PDF with
 its messages in chronological order: for each one the role (sent / received / receipt and its type), date, from, to,
 subject, the decoded text and the list of attachments (listed, not embedded). Files go to `<out_dir>/threads/`
 (`--pdf-dir DIR` chooses the folder and implies `--thread-pdf`); the folder link is printed at the end and, with
