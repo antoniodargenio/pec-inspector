@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from pec_inspector import credentials, discovery, formats, netsafe, pki   # noqa: E402
+from pec_inspector import cli, credentials, discovery, export, formats, netsafe, pki   # noqa: E402
 
 HAVE_OPENSSL = shutil.which("openssl") is not None
 
@@ -200,6 +200,122 @@ class SignatureTest(unittest.TestCase):
     def test_pdf_without_signature(self):
         text, _ = self.run_checks({"plain.pdf": b"%PDF-1.4\n%%EOF\n"})
         self.assertIn("no digital signature in the PDF", text)
+
+
+class ExportTest(unittest.TestCase):
+    def build(self, with_p7m=None):
+        from email.message import EmailMessage
+        inner = EmailMessage()
+        inner["From"], inner["To"], inner["Subject"] = "a@example.test", "b@example.test", "Hello è world"
+        inner.set_content("plain body è")
+        inner.add_alternative("<html><body><p>html <b>body</b></p><script>x()</script></body></html>", subtype="html")
+        inner.add_attachment(b"%PDF-1.4 data", maintype="application", subtype="pdf", filename="../../evil.pdf")
+        inner.add_attachment(b"one", maintype="text", subtype="plain", filename="dup.txt")
+        inner.add_attachment(b"two", maintype="text", subtype="plain", filename="dup.txt")
+        if with_p7m:
+            inner.add_attachment(with_p7m, maintype="application", subtype="pkcs7-mime", filename="doc.txt.p7m")
+        outer = EmailMessage()
+        outer["From"], outer["Subject"] = "posta-certificata@example.test", "POSTA CERTIFICATA: Hello"
+        outer.set_content("PEC wrapper text")
+        outer.add_attachment(inner, filename="postacert.eml")
+        outer.add_attachment(b"<postacert/>", maintype="application", subtype="xml", filename="daticert.xml")
+        outer.add_attachment(b"sig", maintype="application", subtype="pkcs7-signature", filename="smime.p7s")
+        return outer
+
+    def test_export_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder, count = export.export_message("7", self.build(), tmp, raw=b"RAW")
+            self.assertEqual(folder.parent, Path(tmp))
+            self.assertEqual(count, 3)
+            names = sorted(p.name for p in (folder / "attachments").iterdir())
+            self.assertEqual(names, ["dup.txt", "dup_2.txt", "evil.pdf"])      # duplicates are renamed
+            self.assertTrue((folder / "attachments" / "evil.pdf").exists())   # path traversal neutralised
+            text = (folder / "message.txt").read_text(encoding="utf-8")
+            self.assertIn("From: a@example.test", text)
+            self.assertIn("plain body è", text)
+            self.assertNotIn("PEC wrapper text", text)
+            html = (folder / "message.html").read_text(encoding="utf-8")
+            self.assertTrue(html.startswith("<meta http-equiv=\"Content-Security-Policy\""))
+            pec = sorted(p.name for p in (folder / "pec").iterdir())
+            self.assertEqual(pec, ["daticert.xml", "envelope.eml", "envelope.txt", "smime.p7s"])
+            self.assertEqual(list(Path(tmp).glob("**/evil.pdf")), [folder / "attachments" / "evil.pdf"])
+
+    def test_html_only_body_and_receipt(self):
+        from email.message import EmailMessage
+        receipt = EmailMessage()
+        receipt["Subject"] = "ACCETTAZIONE: x"
+        receipt.set_content("Receipt text")
+        with tempfile.TemporaryDirectory() as tmp:
+            folder, count = export.export_message("1", receipt, tmp)
+            self.assertEqual(count, 0)
+            self.assertIn("Receipt text", (folder / "message.txt").read_text(encoding="utf-8"))
+        self.assertEqual(export.html_to_text("<p>a</p><script>x</script><div>b &amp; c</div>").split(), ["a", "b", "&", "c"])
+
+    @unittest.skipUnless(HAVE_OPENSSL, "openssl not available")
+    def test_p7m_content_extracted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "k.pem", "-out", "c.pem",
+                            "-subj", "/CN=T", "-days", "2"], cwd=tmp, check=True, capture_output=True)
+            Path(tmp, "doc.txt").write_bytes(b"signed content\n")
+            subprocess.run(["openssl", "cms", "-sign", "-in", "doc.txt", "-signer", "c.pem", "-inkey", "k.pem", "-outform",
+                            "DER", "-out", "doc.txt.p7m", "-nodetach", "-binary"], cwd=tmp, check=True, capture_output=True)
+            out = Path(tmp, "out")
+            folder, _ = export.export_message("1", self.build(Path(tmp, "doc.txt.p7m").read_bytes()), out)
+            self.assertEqual((folder / "attachments" / "doc.txt").read_bytes(), b"signed content\n")
+            self.assertTrue((folder / "attachments" / "doc.txt.p7m").exists())
+
+
+class OutputDirectoryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.eml = os.path.join(self.tmp.name, "m.eml")
+        Path(self.eml).write_bytes(b"\r\n".join([b"From: a@example.test", b"Subject: ANOMALIA MESSAGGIO: t",
+                                                 b"X-Trasporto: errore", b"", b"body", b""]))
+        self.old_tempdir, self.old_env = tempfile.tempdir, os.environ.pop("PEC_OUT_DIR", None)
+        tempfile.tempdir = os.path.join(self.tmp.name, "systemtemp")
+        os.mkdir(tempfile.tempdir)
+
+    def tearDown(self):
+        tempfile.tempdir = self.old_tempdir
+        if self.old_env is not None:
+            os.environ["PEC_OUT_DIR"] = self.old_env
+        self.tmp.cleanup()
+
+    def run_cli(self, *argv):
+        import contextlib
+        import io
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main(list(argv))
+        return code, buffer.getvalue()
+
+    def test_explicit_directory_is_used(self):
+        target = os.path.join(self.tmp.name, "chosen", "sub")
+        code, out = self.run_cli(target, "--eml", self.eml, "--no-revocation")
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(os.path.join(target, "msg_file.eml")))
+        self.assertIn("Download folder: " + str(Path(target).resolve()), out)
+        self.assertEqual(os.listdir(tempfile.tempdir), [])
+
+    def test_system_temp_is_used_when_omitted(self):
+        code, out = self.run_cli("--eml", self.eml, "--no-revocation", "--export")
+        self.assertEqual(code, 0)
+        created = os.listdir(tempfile.tempdir)
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].startswith("pec-inspector-"))
+        folder = os.path.join(tempfile.tempdir, created[0])
+        self.assertTrue(os.path.exists(os.path.join(folder, "msg_file.eml")))
+        self.assertTrue(os.path.isdir(os.path.join(folder, "export")))
+        self.assertIn("Link: file://", out)
+
+    def test_environment_variable_sets_the_root(self):
+        target = os.path.join(self.tmp.name, "fromenv")
+        os.environ["PEC_OUT_DIR"] = target
+        try:
+            self.run_cli("--eml", self.eml, "--no-revocation")
+        finally:
+            del os.environ["PEC_OUT_DIR"]
+        self.assertTrue(os.path.exists(os.path.join(target, "msg_file.eml")))
 
 
 if __name__ == "__main__":

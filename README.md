@@ -49,8 +49,38 @@ pec-inspector out/ --from agency@pec.example.test
 pec-inspector out/ --eml saved-message.eml     # offline analysis, no IMAP access
 ```
 
+**Where files go.** `OUT_DIR` is the root of everything that is downloaded: pass it as the first argument or set
+`PEC_OUT_DIR`. If you give neither, a new private directory (`pec-inspector-XXXX`, mode 0700 on POSIX) is created in the
+system temporary directory (`TMPDIR` / `TEMP` / `TMP`); the path and a `file://` link are printed at the start and at the
+end, and the directory is removed again if nothing was downloaded. Temporary directories are not cleaned up
+automatically after a successful run: delete them when you are done, since they contain your mail.
+
 Each message is unpacked into the output directory: `msg_<n>.eml` (the envelope), `<n>_postacert.eml`,
 `<n>_daticert.xml`, `<n>_smime.p7s` and the real attachments as `<n>_orig_<name>`; the report is printed on stdout.
+
+## Export in the clear
+
+`--export` also saves every processed message as plain, readable files and prints the link of the folder at the end
+(`--export-dir DIR` chooses the folder, default `<out_dir>/export`, and implies `--export`):
+
+```
+<export>/<n>_<subject>/
+    message.txt        headers + decoded body of the original message (HTML converted to text if needed)
+    message.html       the HTML body, if any
+    attachments/       every attachment of the original message; for .p7m also the signed content, unpacked
+    pec/               certification parts: daticert.xml, smime.p7s, the PEC wrapper text, the raw envelope.eml
+```
+
+```sh
+pec-inspector out/ --search "Prot. 0123456" --export
+# ...
+# Export folder: /home/me/out/export
+# Link: file:///home/me/out/export
+```
+
+Receipts (acceptance, delivery) have no enclosed original: `message.txt` then holds the receipt text.
+Attachment names are sanitised and duplicates renamed. `message.html` starts with a Content-Security-Policy tag that
+blocks remote images and scripts, but attachments are saved untouched: open them with the usual care.
 
 ## Credentials
 

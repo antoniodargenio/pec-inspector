@@ -7,12 +7,13 @@ import imaplib
 import os
 import ssl
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from email import policy
+from pathlib import Path
 from typing import List, Optional
 
-from . import __version__, formats, netsafe, pki
+from . import __version__, export, formats, netsafe, pki
 from .credentials import CredentialsError, resolve_credentials
 from .discovery import ImapServer, discover
 
@@ -24,7 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "PEC structure and check receipts, signatures, certificate chains and revocation.",
         epilog="Credentials: environment (PEC_ADDRESS, PEC_PASSWORD, PEC_CREDENTIALS_FILE, ...) or a credentials "
                "file; see the README. The password is never taken from the command line.")
-    p.add_argument("out_dir", help="directory where messages and attachments are unpacked (created if needed)")
+    p.add_argument("out_dir", nargs="?", metavar="OUT_DIR",
+                   help="root directory for everything that is downloaded (created if needed; may also be set with "
+                        "PEC_OUT_DIR). If omitted, a new private directory is created in the system temporary "
+                        "directory (TMPDIR / TEMP / TMP) and its link is printed")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     acc = p.add_argument_group("mailbox")
@@ -60,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="skip OCSP/CRL checks (by default the servers named in the certificates are contacted)")
     chk.add_argument("--allow-private-urls", action="store_true",
                      help="allow OCSP/CRL/AIA URLs on private or loopback addresses (intranet PKI, tests)")
+
+    exp = p.add_argument_group("export")
+    exp.add_argument("--export", action="store_true",
+                     help="also save each message in the clear (decoded text/HTML body) with all its attachments, "
+                          "and print the link of the folder (default folder: <out_dir>/export)")
+    exp.add_argument("--export-dir", metavar="DIR", help="export folder (implies --export)")
     p.add_argument("-v", "--verbose", action="store_true", help="show discovery details on stderr")
     return p
 
@@ -276,7 +286,17 @@ def analyse_message(num: str, raw: bytes, args) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     netsafe.set_allow_private(args.allow_private_urls)
-    os.makedirs(args.out_dir, exist_ok=True)
+    temporary = False
+    if not args.out_dir:
+        args.out_dir = os.environ.get("PEC_OUT_DIR") or ""
+    if args.out_dir:
+        args.out_dir = os.path.abspath(args.out_dir)
+        os.makedirs(args.out_dir, exist_ok=True)
+    else:                                    # system temp directory; mkdtemp creates it private (mode 0700 on POSIX)
+        args.out_dir = tempfile.mkdtemp(prefix="pec-inspector-")
+        temporary = True
+    args.out_dir = str(Path(args.out_dir).resolve())   # canonical path (e.g. no 8.3 short names on Windows)
+    eprint(f"download folder: {args.out_dir}" + (" (temporary)" if temporary else ""))
 
     conn = None
     try:
@@ -306,6 +326,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 eprint(f"error: IMAP connection failed: {exc}")
                 return 1
         print("messages found:", len(ids))
+        export_root = None
+        if args.export or args.export_dir:
+            export_root = Path(args.export_dir or os.path.join(args.out_dir, "export")).resolve()
+            export_root.mkdir(parents=True, exist_ok=True)
         for item in ids:
             if conn is None:
                 raw = Path(args.eml).read_bytes()
@@ -313,11 +337,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 _, data = conn.fetch(item, "(BODY.PEEK[])")                # PEEK: do not mark as read
                 raw = data[0][1]
             analyse_message(item.decode(), raw, args)
+            if export_root is not None:
+                folder, count = export.export_message(item.decode(), email.message_from_bytes(raw, policy=policy.default),
+                                                      export_root, raw)
+                print(f"exported: {folder} ({count} attachment{'s' if count != 1 else ''})")
+        print(f"\nDownload folder: {args.out_dir}\nLink: {Path(args.out_dir).as_uri()}")
+        if export_root is not None:
+            print(f"Export folder: {export_root}\nLink: {export_root.as_uri()}")
     finally:
         if conn is not None:
             try:
                 conn.logout()
             except Exception:
+                pass
+        if temporary:
+            try:
+                os.rmdir(args.out_dir)           # nothing was downloaded (error, --discover-only): no empty leftovers
+            except OSError:
                 pass
     return 0
 
