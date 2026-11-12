@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pec-inspector"
-version = "0.1.0"
+dynamic = ["version"]          # from the git tag vX.Y.Z (setuptools-scm)
 description = "Read-only download and verification of Italian PEC / REM messages: receipts, signatures, trust chains, OCSP/CRL"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,3 +28,6 @@ pec-inspector = "pec_inspector.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools_scm]
+fallback_version = "0+unknown"   # e.g. a source archive without git metadata

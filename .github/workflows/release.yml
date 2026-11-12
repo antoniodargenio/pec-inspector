@@ -1,0 +1,53 @@
+name: Release
+
+# On every push to main: work out the next version from the Conventional Commits since the last tag
+# (scripts/next_version.py), and if there is something to release run the tests, build the package,
+# create the tag vX.Y.Z and publish a GitHub release with generated notes and the build artifacts.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history and tags
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Next version
+        id: version
+        run: |
+          version="$(python scripts/next_version.py --explain)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        if: steps.version.outputs.version != ''
+        run: |
+          python -m pip install -e ".[all]"
+          python -W error::ResourceWarning -m unittest discover -s tests -v
+
+      - name: Tag, build and release
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "v${VERSION}"                      # setuptools-scm takes the package version from this tag
+          python -m pip install build
+          python -m build
+          gh release create "v${VERSION}" dist/* \
+            --target "${GITHUB_SHA}" --title "v${VERSION}" --generate-notes

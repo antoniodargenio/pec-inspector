@@ -163,6 +163,26 @@ Only TLS connections (implicit or STARTTLS, with certificate verification) are u
 
 Run `pec-inspector --help`. Search arguments for `--search` / `--from` must be ASCII.
 
+## Versions and releases
+
+Versions and releases are automatic. On every push to `main`, the
+[release workflow](.github/workflows/release.yml) reads the commit messages since the last `vX.Y.Z` tag
+([`scripts/next_version.py`](scripts/next_version.py)), and if there is something to release it runs the tests,
+creates the next tag, builds the package and publishes a GitHub release with generated notes and the artifacts.
+The package version comes from the tag (`setuptools-scm`); nothing is edited by hand.
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+| Commit | Effect |
+|---|---|
+| `feat: ...` | minor bump (`0.1.0` → `0.2.0`) |
+| `fix: ...`, `perf: ...`, `refactor: ...`, or any other message | patch bump (`0.1.0` → `0.1.1`) |
+| `type!: ...` or a `BREAKING CHANGE:` footer | major bump (minor while the version is `0.x`) |
+| only `docs:`, `chore:`, `ci:`, `test:`, `style:`, `build:` | no release |
+
+Run `python scripts/next_version.py --explain` to see what the next release would be. Releases from a source
+checkout without installing report the version `0+unknown`.
+
 ## Development
 
 ```sh
